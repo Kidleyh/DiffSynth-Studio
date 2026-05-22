@@ -3,6 +3,7 @@ import os
 import warnings
 
 import accelerate
+from transformers.integrations.deepspeed import HfDeepSpeedConfig
 import torch
 from diffsynth.core import UnifiedDataset
 from diffsynth.core.data.operators import LoadAudioWithTorchaudio, RouteByType, SequencialProcess, ToAbsolutePath
@@ -110,6 +111,7 @@ class LTX2AnyFlowTrainingModule(DiffusionTrainingModule):
             "flowmap_sft:data_process": lambda pipe, *args: args,
             "flowmap_sft": self.flowmap_sft_loss,
             "flowmap_sft:train": self.flowmap_sft_loss,
+            "flowmap_sft:backward_smoke": self.flowmap_sft_loss,
         }
 
     def flowmap_sft_loss(self, pipe, inputs_shared, inputs_posi, inputs_nega):
@@ -161,6 +163,21 @@ class LTX2AnyFlowTrainingModule(DiffusionTrainingModule):
         return self.task_to_loss[self.task](self.pipe, *inputs)
 
 
+def launch_backward_smoke_task(accelerator, dataset, model, model_logger, args=None):
+    num_workers = 0 if args is None else args.dataset_num_workers
+    dataloader = torch.utils.data.DataLoader(dataset, shuffle=False, collate_fn=lambda x: x[0], num_workers=num_workers)
+    model.to(device=accelerator.device)
+    model, dataloader = accelerator.prepare(model, dataloader)
+    data = next(iter(dataloader))
+    if dataset.load_from_cache:
+        loss = model({}, inputs=data)
+    else:
+        loss = model(data)
+    accelerator.backward(loss)
+    print(f"backward_smoke_loss={float(loss.detach().cpu()):.6f}", flush=True)
+
+
+
 def ltx2_anyflow_parser():
     parser = argparse.ArgumentParser(description="LTX2 AnyFlow flow-map pretraining entrypoint.")
     parser = add_general_config(parser)
@@ -182,6 +199,10 @@ if __name__ == "__main__":
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         kwargs_handlers=[accelerate.DistributedDataParallelKwargs(find_unused_parameters=args.find_unused_parameters)],
     )
+    hf_deepspeed_config = None
+    if getattr(accelerator.state, "deepspeed_plugin", None) is not None:
+        hf_deepspeed_config = HfDeepSpeedConfig(accelerator.state.deepspeed_plugin.deepspeed_config)
+
     video_processor = UnifiedDataset.default_video_operator(
         base_path=args.dataset_base_path,
         max_pixels=args.max_pixels,
@@ -244,5 +265,6 @@ if __name__ == "__main__":
         "flowmap_sft:data_process": launch_data_process_task,
         "flowmap_sft": launch_training_task,
         "flowmap_sft:train": launch_training_task,
+        "flowmap_sft:backward_smoke": launch_backward_smoke_task,
     }
     launcher_map[args.task](accelerator, dataset, model, model_logger, args=args)

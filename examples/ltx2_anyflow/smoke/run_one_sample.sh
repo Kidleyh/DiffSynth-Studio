@@ -32,6 +32,10 @@ ENCODER_MODEL_SPEC=${ENCODER_MODEL_SPEC:-DiffSynth-Studio/LTX-2.3-Repackage:text
 # Stage 2 needs only the DiT/transformer. You can override this with a local checkpoint, e.g.:
 #   TRANSFORMER_MODEL_SPEC=/gemini/.../model_output/LTX2.3-I2AV-moe-0519/step-3000.safetensors bash ...
 TRANSFORMER_MODEL_SPEC=${TRANSFORMER_MODEL_SPEC:-DiffSynth-Studio/LTX-2.3-Repackage:transformer.safetensors}
+TRANSFORMER_MODEL_ARGS=(--model_id_with_origin_paths "$TRANSFORMER_MODEL_SPEC")
+if [[ "$TRANSFORMER_MODEL_SPEC" != *:* ]]; then
+  TRANSFORMER_MODEL_ARGS=(--model_paths "$TRANSFORMER_MODEL_SPEC")
+fi
 
 COMMON_DATA_ARGS=(
   --data_file_keys "video,input_audio"
@@ -64,7 +68,7 @@ echo "[2/2] Running one AnyFlow training step to $OUTPUT_DIR"
 accelerate launch examples/ltx2_anyflow/model_training/train.py \
   --dataset_base_path "$CACHE_DIR" \
   "${COMMON_DATA_ARGS[@]}" \
-  --model_id_with_origin_paths "$TRANSFORMER_MODEL_SPEC" \
+  "${TRANSFORMER_MODEL_ARGS[@]}" \
   --learning_rate 1e-6 \
   --num_epochs 1 \
   --save_steps 1 \

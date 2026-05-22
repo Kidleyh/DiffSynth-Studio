@@ -1,5 +1,4 @@
 import torch, os, argparse, accelerate, warnings
-from transformers.integrations.deepspeed import HfDeepSpeedConfig
 from diffsynth.core import UnifiedDataset
 from diffsynth.core.data.operators import LoadAudioWithTorchaudio, ToAbsolutePath, RouteByType, SequencialProcess
 from diffsynth.pipelines.ltx2_audio_video import LTX2AudioVideoPipeline, ModelConfig
@@ -119,10 +118,6 @@ if __name__ == "__main__":
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         kwargs_handlers=[accelerate.DistributedDataParallelKwargs(find_unused_parameters=args.find_unused_parameters)],
     )
-    hf_deepspeed_config = None
-    if getattr(accelerator.state, "deepspeed_plugin", None) is not None:
-        hf_deepspeed_config = HfDeepSpeedConfig(accelerator.state.deepspeed_plugin.deepspeed_config)
-
     video_processor = UnifiedDataset.default_video_operator(
             base_path=args.dataset_base_path,
             max_pixels=args.max_pixels,
@@ -167,7 +162,7 @@ if __name__ == "__main__":
         fp8_models=args.fp8_models,
         offload_models=args.offload_models,
         task=args.task,
-        device="cpu" if (args.initialize_model_on_cpu or args.enable_model_cpu_offload) else accelerator.device,
+        device=accelerator.device,
     )
     model_logger = ModelLogger(
         args.output_path,

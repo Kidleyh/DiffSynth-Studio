@@ -40,7 +40,13 @@ def launch_training_task(
         model.pipe.device = accelerator.device
         offload_manager = OffloadTrainingManager(model, accelerator.device, enable_optimizer_cpu_offload, cpu_offload_split_threshold)
     else:
-        model.to(device=accelerator.device)
+        uses_deepspeed = getattr(accelerator.state, "deepspeed_plugin", None) is not None
+        if uses_deepspeed:
+            # Let DeepSpeed ZeRO initialize/partition the model in accelerator.prepare().
+            # Moving the full 22B DiT to each GPU first can SIGKILL a rank before ZeRO3 takes over.
+            model.pipe.device = accelerator.device
+        else:
+            model.to(device=accelerator.device)
         model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
 
     initialize_deepspeed_gradient_checkpointing(accelerator)

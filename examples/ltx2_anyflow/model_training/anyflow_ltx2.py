@@ -24,7 +24,7 @@ class AnyFlowTimeAdapter(torch.nn.Module):
         t = timestep.to(device=device, dtype=torch.float32).reshape(-1, 1)
         r = r_timestep.to(device=device, dtype=torch.float32).reshape(-1, 1)
         delta = (t - r).clamp(min=0.0)
-        features = torch.cat([t, r, delta, delta / (t + 1e-6)], dim=-1)
+        features = torch.cat([t, r, delta, delta / (t + 1e-6)], dim=-1).to(dtype=dtype)
         emb = self.net(features).to(dtype=dtype)
         return emb[:, None, :].repeat(1, seq_len, 1)
 

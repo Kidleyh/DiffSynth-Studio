@@ -1,22 +1,29 @@
 def LTX2TextEncoderStateDictConverter(state_dict):
     state_dict_ = {}
-    for key in state_dict:
-        if key.startswith("language_model.model."):
-            new_key = key.replace("language_model.model.", "model.language_model.")
-        elif key.startswith("vision_tower."):
-            new_key = key.replace("vision_tower.", "model.vision_tower.")
-        elif key.startswith("multi_modal_projector."):
-            new_key = key.replace("multi_modal_projector.", "model.multi_modal_projector.")
-        elif key.startswith("language_model.lm_head."):
-            new_key = key.replace("language_model.lm_head.", "lm_head.")
-        else:
-            continue
-        state_dict_[new_key] = state_dict[key]
-    state_dict_["lm_head.weight"] = state_dict_.get("model.language_model.embed_tokens.weight")
-    # Fix compatibility with transformers version >= 5.6.0 where the vision_model is removed in the state dict keys
     from packaging import version
     import transformers
-    if version.parse(transformers.__version__) >= version.parse("5.6.0"):
+    transformers_version = version.parse(transformers.__version__)
+    use_model_prefix = transformers_version >= version.parse("4.51.0")
+    for key in state_dict:
+        if key.startswith("language_model.model."):
+            new_key = key.replace("language_model.model.", "model.language_model.") if use_model_prefix else key
+        elif key.startswith("vision_tower."):
+            new_key = key.replace("vision_tower.", "model.vision_tower.") if use_model_prefix else key
+        elif key.startswith("multi_modal_projector."):
+            new_key = key.replace("multi_modal_projector.", "model.multi_modal_projector.") if use_model_prefix else key
+        elif key.startswith("language_model.lm_head."):
+            new_key = key.replace("language_model.lm_head.", "lm_head.") if use_model_prefix else None
+        else:
+            continue
+        if new_key is None:
+            continue
+        state_dict_[new_key] = state_dict[key]
+    if use_model_prefix:
+        state_dict_["lm_head.weight"] = state_dict_.get("model.language_model.embed_tokens.weight")
+    else:
+        state_dict_["language_model.lm_head.weight"] = state_dict_.get("language_model.model.embed_tokens.weight")
+    # Fix compatibility with transformers version >= 5.6.0 where the vision_model is removed in the state dict keys
+    if transformers_version >= version.parse("5.6.0"):
         state_dict_ = {k.replace(".vision_model.", "."): v for k, v in state_dict_.items()}
     return state_dict_
 
