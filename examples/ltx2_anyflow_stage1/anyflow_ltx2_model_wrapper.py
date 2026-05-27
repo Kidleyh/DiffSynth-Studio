@@ -17,6 +17,8 @@ class AnyFlowAdaLayerNormSingle(torch.nn.Module):
         self._r_timestep = None
         for param in self.base_adaln.parameters():
             param.requires_grad = False
+        for param in self.r_adaln.parameters():
+            param.requires_grad = True
 
     def set_r_timestep(self, r_timestep: Optional[torch.Tensor]):
         self._r_timestep = r_timestep
@@ -175,3 +177,27 @@ class LTX2AnyFlowWrapper(torch.nn.Module):
 def trainable_state_dict(module: torch.nn.Module):
     return {name: param.detach().cpu() for name, param in module.named_parameters() if param.requires_grad}
 
+
+def load_trainable_state_dict(module: torch.nn.Module, state_dict, strict_trainable=True):
+    missing, unexpected = module.load_state_dict(state_dict, strict=False)
+    if missing:
+        print("missing keys while loading AnyFlow checkpoint:")
+        for key in missing:
+            print(f"  {key}")
+    if unexpected:
+        print("unexpected keys while loading AnyFlow checkpoint:")
+        for key in unexpected:
+            print(f"  {key}")
+    critical_tokens = ("lora", "r_adaln", "r_timestep", "time_adapter", "anyflow")
+    critical_unexpected = [key for key in unexpected if any(token in key for token in critical_tokens)]
+    if critical_unexpected:
+        raise RuntimeError(f"Unexpected critical AnyFlow/LoRA keys: {critical_unexpected}")
+    if strict_trainable:
+        trainable_names = {name for name, param in module.named_parameters() if param.requires_grad}
+        missing_trainable = sorted(name for name in trainable_names if name not in state_dict)
+        if missing_trainable:
+            print("missing trainable keys while loading AnyFlow checkpoint:")
+            for key in missing_trainable:
+                print(f"  {key}")
+            raise RuntimeError("Checkpoint is missing trainable AnyFlow/LoRA weights.")
+    return missing, unexpected

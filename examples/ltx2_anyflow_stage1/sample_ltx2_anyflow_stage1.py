@@ -5,7 +5,8 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
-from anyflow_ltx2_model_wrapper import LTX2AnyFlowWrapper
+from anyflow_ltx2_lora import inject_lora_linear, parse_name_filter
+from anyflow_ltx2_model_wrapper import LTX2AnyFlowWrapper, load_trainable_state_dict
 from anyflow_ltx2_scheduler import FlowMapEulerSchedulerForLTX2
 
 
@@ -24,13 +25,44 @@ def load_model_configs(path):
     return [ModelConfig(**item) for item in data]
 
 
+def checkpoint_paths(checkpoint):
+    ckpt = Path(checkpoint)
+    if ckpt.is_file():
+        return ckpt.parent, ckpt, None
+    return ckpt, ckpt / "anyflow_wrapper.pt", ckpt / "anyflow_config.json"
+
+
+def load_anyflow_config(checkpoint):
+    ckpt_dir, _, cfg_path = checkpoint_paths(checkpoint)
+    if cfg_path is None or not cfg_path.exists():
+        raise RuntimeError(f"Missing anyflow_config.json in checkpoint directory: {ckpt_dir}")
+    return json.loads(cfg_path.read_text())
+
+
+def build_wrapper(pipe, cfg, device, dtype):
+    wrapper_cfg = cfg.get("wrapper_config", {})
+    wrapper = LTX2AnyFlowWrapper(
+        pipe.dit,
+        gate=float(wrapper_cfg.get("gate", cfg.get("gate_init", 0.25))),
+        freeze_base=bool(wrapper_cfg.get("freeze_base", True)),
+    )
+    if cfg.get("use_lora", False):
+        updated = inject_lora_linear(
+            wrapper.dit,
+            rank=int(cfg.get("lora_rank", 256)),
+            alpha=float(cfg.get("lora_alpha", cfg.get("lora_scale", cfg.get("lora_rank", 256)))),
+            name_filter=parse_name_filter(cfg.get("lora_target_filter", ("attn", "ff", "proj"))),
+        )
+        print(f"injected LoRA into {updated} linear layers from checkpoint config", flush=True)
+        if updated == 0:
+            raise RuntimeError("Checkpoint config requested LoRA, but no target Linear layers matched.")
+    return wrapper.to(device=device, dtype=dtype)
+
+
 def load_anyflow_checkpoint(wrapper, checkpoint):
-    path = Path(checkpoint)
-    if path.is_dir():
-        path = path / "anyflow_wrapper.pt"
-    state = torch.load(path, map_location="cpu")
-    missing, unexpected = wrapper.load_state_dict(state, strict=False)
-    print(f"loaded AnyFlow checkpoint: missing={len(missing)} unexpected={len(unexpected)}", flush=True)
+    _, state_path, _ = checkpoint_paths(checkpoint)
+    state = torch.load(state_path, map_location="cpu")
+    load_trainable_state_dict(wrapper, state, strict_trainable=True)
 
 
 def prepare_pipeline_inputs(pipe, args, device):
@@ -68,7 +100,36 @@ def prepare_pipeline_inputs(pipe, args, device):
     }
     for unit in pipe.units:
         inputs_shared, inputs_posi, inputs_nega = pipe.unit_runner(unit, pipe, inputs_shared, inputs_posi, inputs_nega)
-    return inputs_shared, inputs_posi, inputs_nega
+    return inputs_shared, inputs_posi
+
+
+def load_init_latents(init_latents, device, dtype):
+    if init_latents is None:
+        return None, None
+    base = Path(init_latents)
+    if base.is_dir():
+        video_path = base / "video_latents.pt"
+        audio_path = base / "audio_latents.pt"
+    else:
+        data = json.loads(base.read_text())
+        video_path = Path(data["video_latents"])
+        audio_path = Path(data["audio_latents"])
+    video_latents = torch.load(video_path, map_location=device).to(dtype=dtype)
+    audio_latents = torch.load(audio_path, map_location=device).to(dtype=dtype)
+    return video_latents, audio_latents
+
+
+def norm_value(x):
+    return float(x.detach().float().norm().cpu())
+
+
+def save_latent_rollout(output_path, video_latents, audio_latents, stats):
+    out = Path(output_path)
+    out.mkdir(parents=True, exist_ok=True)
+    torch.save(video_latents.detach().cpu(), out / "final_video_latents.pt")
+    torch.save(audio_latents.detach().cpu(), out / "final_audio_latents.pt")
+    (out / "rollout_stats.json").write_text(json.dumps(stats, indent=2))
+    print(f"latent rollout saved to {out}", flush=True)
 
 
 @torch.no_grad()
@@ -92,6 +153,8 @@ def main():
     parser.add_argument("--tile_overlap_in_pixels", type=int, default=128)
     parser.add_argument("--tile_size_in_frames", type=int, default=128)
     parser.add_argument("--tile_overlap_in_frames", type=int, default=24)
+    parser.add_argument("--latent_rollout_only", action="store_true")
+    parser.add_argument("--init_latents")
     args = parser.parse_args()
 
     from diffsynth.pipelines.ltx2_audio_video import LTX2AudioVideoPipeline
@@ -99,26 +162,38 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = dtype_from_arg(args.dtype) if device == "cuda" else torch.float32
+    cfg = load_anyflow_config(args.checkpoint)
     pipe = LTX2AudioVideoPipeline.from_pretrained(
         torch_dtype=dtype,
         device=device,
         model_configs=load_model_configs(args.model_config_path),
     )
-    wrapper = LTX2AnyFlowWrapper(pipe.dit, freeze_base=True).to(device=device, dtype=dtype)
+    wrapper = build_wrapper(pipe, cfg, device, dtype)
     load_anyflow_checkpoint(wrapper, args.checkpoint)
     wrapper.eval()
 
-    inputs_shared, inputs_posi, _ = prepare_pipeline_inputs(pipe, args, device)
-    video_latents = inputs_shared["video_latents"]
-    audio_latents = inputs_shared["audio_latents"]
+    inputs_shared, inputs_posi = prepare_pipeline_inputs(pipe, args, device)
+    init_video, init_audio = load_init_latents(args.init_latents, device, dtype)
+    video_latents = init_video if init_video is not None else inputs_shared["video_latents"]
+    audio_latents = init_audio if init_audio is not None else inputs_shared["audio_latents"]
     scheduler = FlowMapEulerSchedulerForLTX2(device=device, dtype=dtype)
     timesteps = scheduler.set_timesteps(args.num_inference_steps, device=device, dtype=dtype)
     video_context = inputs_posi["video_context"]
     audio_context = inputs_posi["audio_context"]
 
+    stats = {
+        "num_inference_steps": args.num_inference_steps,
+        "video_latent_shape": list(video_latents.shape),
+        "audio_latent_shape": list(audio_latents.shape),
+        "initial_video_norm": norm_value(video_latents),
+        "initial_audio_norm": norm_value(audio_latents),
+        "steps": [],
+    }
     for i in tqdm(range(args.num_inference_steps)):
         t = timesteps[i].expand(video_latents.shape[0])
         r = timesteps[i + 1].expand(video_latents.shape[0])
+        prev_video = video_latents
+        prev_audio = audio_latents
         u_video, u_audio = wrapper(
             video_latents=video_latents,
             audio_latents=audio_latents,
@@ -133,6 +208,24 @@ def main():
         )
         video_latents = scheduler.step(u_video, video_latents, t, r)
         audio_latents = scheduler.step(u_audio, audio_latents, t, r)
+        stats["steps"].append(
+            {
+                "index": i,
+                "t": float(timesteps[i].detach().cpu()),
+                "r": float(timesteps[i + 1].detach().cpu()),
+                "video_norm": norm_value(video_latents),
+                "audio_norm": norm_value(audio_latents),
+                "video_delta_norm": norm_value(video_latents - prev_video),
+                "audio_delta_norm": norm_value(audio_latents - prev_audio),
+            }
+        )
+    stats["final_video_norm"] = norm_value(video_latents)
+    stats["final_audio_norm"] = norm_value(audio_latents)
+    stats["schedule"] = [float(x) for x in timesteps.detach().cpu()]
+
+    if args.latent_rollout_only:
+        save_latent_rollout(args.output_path, video_latents, audio_latents, stats)
+        return
 
     video = pipe.video_vae_decoder.decode(
         video_latents,
