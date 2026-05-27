@@ -2,6 +2,7 @@ import argparse
 import csv
 import json
 import os
+import warnings
 from pathlib import Path
 
 import torch
@@ -13,6 +14,7 @@ from anyflow_ltx2_lora import (
     parse_name_filter,
     trainable_parameter_report,
 )
+from anyflow_ltx2_debug import collect_gradient_sanity
 from anyflow_ltx2_model_wrapper import LTX2AnyFlowWrapper, load_trainable_state_dict, trainable_state_dict
 from anyflow_ltx2_stage1_loss import anyflow_ltx2_stage1_loss
 
@@ -53,6 +55,9 @@ def anyflow_config_from_args(args):
         "use_adaptive_weight": not bool(args.disable_adaptive_weight),
         "wrapper_class": "LTX2AnyFlowWrapper",
         "wrapper_config": {"gate": float(args.gate_init), "freeze_base": True},
+        "gradient_sanity_checked": bool(getattr(args, "_gradient_sanity_checked", False)),
+        "frozen_unused_r_adaln_linear": True,
+        "trainable_without_grad_policy": "allow" if args.allow_trainable_without_grad else "raise",
     }
 
 
@@ -266,10 +271,42 @@ def save_checkpoint(output_dir, step, model, optimizer, args):
 def load_checkpoint(model, optimizer, resume_dir):
     resume_dir = Path(resume_dir)
     state = torch.load(resume_dir / "anyflow_wrapper.pt", map_location="cpu")
-    load_trainable_state_dict(model, state, strict_trainable=True)
+    missing, unexpected = load_trainable_state_dict(model, state, strict_trainable=True)
     optimizer.load_state_dict(torch.load(resume_dir / "optimizer.pt", map_location="cpu"))
     meta = json.loads((resume_dir / "training_state.json").read_text())
+    print(
+        "checkpoint load summary: "
+        f"missing={len(missing)} unexpected={len(unexpected)} global_step={meta.get('global_step', meta.get('step', 0))}",
+        flush=True,
+    )
     return int(meta.get("global_step", meta.get("step", 0)))
+
+
+def save_gradient_sanity_report(output_dir, step, report):
+    path = Path(output_dir) / f"gradient_sanity_step_{step:06d}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2))
+    return path
+
+
+def run_gradient_sanity_or_raise(model, args, step):
+    report = collect_gradient_sanity(model)
+    print(f"gradient_sanity_step_{step:06d}: {json.dumps(report, indent=2)}", flush=True)
+    if args.save_gradient_sanity:
+        save_gradient_sanity_report(args.output_dir, step, report)
+    if report["trainable_zero_grad_names"]:
+        warnings.warn(
+            "Some trainable tensors have zero gradients: "
+            + ", ".join(report["trainable_zero_grad_names"][:20])
+        )
+    if report["trainable_without_grad_names"] and not args.allow_trainable_without_grad:
+        raise RuntimeError(
+            "Trainable tensors without gradients were found. "
+            "Pass --allow_trainable_without_grad to continue for debugging. "
+            f"First names: {report['trainable_without_grad_names'][:20]}"
+        )
+    args._gradient_sanity_checked = True
+    return report
 
 
 def apply_resume_config(args):
@@ -342,7 +379,10 @@ def main():
     parser.add_argument("--resume")
     parser.add_argument("--smoke_test", action="store_true")
     parser.add_argument("--smoke_test_real_wrapper", action="store_true")
+    parser.add_argument("--allow_trainable_without_grad", action="store_true")
+    parser.add_argument("--save_gradient_sanity", action="store_true", default=True)
     args = parser.parse_args()
+    args._gradient_sanity_checked = False
     apply_resume_config(args)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -411,6 +451,8 @@ def main():
         batch = move_batch(batch, device, dtype)
         loss, logs = run_loss(model, pipe, batch, args)
         (loss / args.grad_accum_steps).backward()
+        if not args._gradient_sanity_checked:
+            run_gradient_sanity_or_raise(model, args, step)
         if step % args.grad_accum_steps == 0:
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)

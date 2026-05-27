@@ -162,3 +162,29 @@ Each checkpoint directory contains:
 
 Resume restores wrapper/LoRA weights, optimizer, and global step. Sampling reads `anyflow_config.json`, injects LoRA if needed, then loads `anyflow_wrapper.pt`.
 
+Large numbers of frozen base-model keys missing from `anyflow_wrapper.pt` are normal because checkpoints save only trainable parameters. Missing trainable keys or critical unexpected AnyFlow/LoRA keys raise during load.
+
+`anyflow_config.json` also records gradient-health metadata:
+
+- `gradient_sanity_checked`: whether the run completed the first backward sanity check before saving.
+- `frozen_unused_r_adaln_linear`: true when unused copied `r_adaln.linear` parameters are frozen.
+- `trainable_without_grad_policy`: `raise` or `allow`, based on `--allow_trainable_without_grad`.
+
+## Gradient Sanity Check
+
+Gradient sanity checks confirm that LoRA, the r-timestep embedding path, and the `gate` parameter actually participate in backward. The first backward pass reports trainable tensors with missing gradients, zero gradients, and the top gradient norms. It writes `gradient_sanity_step_000001.json` by default.
+
+```bash
+python examples/ltx2_anyflow_stage1/train_ltx2_anyflow_stage1.py \
+  --smoke_test \
+  --output_dir outputs/ltx2_anyflow_stage1_tiny_smoke \
+  --batch_size 1 \
+  --max_steps 2 \
+  --save_steps 2 \
+  --dtype fp32 \
+  --use_lora \
+  --lora_rank 8 \
+  --save_gradient_sanity
+```
+
+If `trainable_without_grad_names` is non-empty, training raises by default. Pass `--allow_trainable_without_grad` only for debugging.

@@ -19,6 +19,9 @@ class AnyFlowAdaLayerNormSingle(torch.nn.Module):
             param.requires_grad = False
         for param in self.r_adaln.parameters():
             param.requires_grad = True
+        for param in self.r_adaln.linear.parameters():
+            param.requires_grad = False
+        self.frozen_unused_r_adaln_linear = True
 
     def set_r_timestep(self, r_timestep: Optional[torch.Tensor]):
         self._r_timestep = r_timestep
@@ -180,17 +183,12 @@ def trainable_state_dict(module: torch.nn.Module):
 
 def load_trainable_state_dict(module: torch.nn.Module, state_dict, strict_trainable=True):
     missing, unexpected = module.load_state_dict(state_dict, strict=False)
-    if missing:
-        print("missing keys while loading AnyFlow checkpoint:")
-        for key in missing:
-            print(f"  {key}")
-    if unexpected:
-        print("unexpected keys while loading AnyFlow checkpoint:")
-        for key in unexpected:
-            print(f"  {key}")
-    critical_tokens = ("lora", "r_adaln", "r_timestep", "time_adapter", "anyflow")
+    critical_tokens = ("lora", "r_adaln", "r_timestep", "gate", "time_adapter", "anyflow")
     critical_unexpected = [key for key in unexpected if any(token in key for token in critical_tokens)]
     if critical_unexpected:
+        print("critical unexpected keys while loading AnyFlow checkpoint:")
+        for key in critical_unexpected:
+            print(f"  {key}")
         raise RuntimeError(f"Unexpected critical AnyFlow/LoRA keys: {critical_unexpected}")
     if strict_trainable:
         trainable_names = {name for name, param in module.named_parameters() if param.requires_grad}
@@ -200,4 +198,12 @@ def load_trainable_state_dict(module: torch.nn.Module, state_dict, strict_traina
             for key in missing_trainable:
                 print(f"  {key}")
             raise RuntimeError("Checkpoint is missing trainable AnyFlow/LoRA weights.")
+    frozen_missing = [key for key in missing if key not in {name for name, param in module.named_parameters() if param.requires_grad}]
+    if frozen_missing:
+        print(f"frozen base missing keys omitted from trainable checkpoint: {len(frozen_missing)}")
+    noncritical_unexpected = [key for key in unexpected if key not in critical_unexpected]
+    if noncritical_unexpected:
+        print("non-critical unexpected keys while loading AnyFlow checkpoint:")
+        for key in noncritical_unexpected:
+            print(f"  {key}")
     return missing, unexpected
