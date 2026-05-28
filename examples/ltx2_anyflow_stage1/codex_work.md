@@ -529,3 +529,180 @@ accelerate launch --config_file examples/ltx2/model_training/full/accelerate_con
 - Full AnyFlow paper reproduction still requires Stage 2 flow map backward simulation plus DMD.
 - Full-resolution AnyFlow smoke currently fails under gradient checkpointing with PyTorch checkpoint recompute metadata mismatch. The current workaround is `LOW_RES_SMOKE=1`, which disables LTX2 gradient checkpointing and uses smaller `128x128x9` latents for executable validation.
 - The current smoke metadata cannot load audio from the referenced mp4 files in the native audio operator, so `audio_present=false` and audio-specific gradients are zero in this validation. The wrapper/adapter path supports audio conditioning keys when a native cache contains `audio_input_latents` / `input_latents_audio`.
+
+## Round 6: Real I2AV conditioning verification
+
+### A. Files changed
+
+- `examples/ltx2_anyflow_stage1/anyflow_ltx2_native_loss_adapter.py`
+- `examples/ltx2_anyflow_stage1/anyflow_ltx2_stage1_loss.py`
+- `examples/ltx2_anyflow_stage1/LTX-2.3-I2AV-anyflow-stage1-lora-smoke4_4gpu.sh`
+- `examples/ltx2_anyflow_stage1/README.md`
+- `examples/ltx2_anyflow_stage1/codex_work.md`
+
+### B. Files outside this directory
+
+No files outside examples/ltx2_anyflow_stage1 were modified.
+
+### C. Alignment with the user-verified script
+
+- Reference script: `examples/ltx2/model_training/full/LTX-2.3-I2AV-splited_lyh_smoke4_4gpu.sh`.
+- Dataset/metadata: default metadata remains `examples/ltx2/model_training/full/metadata_lyh_smoke4.csv`.
+- `extra_inputs`: remains `input_audio,input_image`.
+- `data_file_keys`: remains `video,input_audio`.
+- `model_id_with_origin_paths`: encoder phase uses text post modules, video VAE encoder, audio VAE encoder, and Gemma; train phase uses `DiffSynth-Studio/LTX-2.3-Repackage:transformer.safetensors`.
+- `input_image` and `input_audio` are still kept in the smoke script. `LOW_RES_SMOKE=1` only changes resource knobs (`height`, `width`, `num_frames`, and gradient checkpointing).
+
+### D. Native model_fn_ltx2 condition key table
+
+| Native key | AnyFlow adapter extracts | AnyFlow wrapper forward uses | optional/required | smoke observed |
+| --- | --- | --- | --- | --- |
+| `input_latents` | yes | yes, as clean video target before noise | required | yes |
+| `video_positions` | yes | yes, passed to DiT and extended for refs | required | yes |
+| `video_context` | yes from `inputs_posi` | yes, passed to DiT | required | yes |
+| `input_latents_video` | yes | yes, patchified and mixed into noisy video latents | optional | yes |
+| `denoise_mask_video` | yes | yes, patchified; controls video latent replacement and video timesteps; also used as loss mask | optional, required if `input_latents_video` exists | yes |
+| `ref_frames_latents` | yes | yes, appended to video token stream when present | optional | no |
+| `ref_frames_positions` | yes | yes, appended with ref latents when present | optional | no |
+| `in_context_video_latents` | yes | yes, appended to video token stream when present | optional | no |
+| `in_context_video_positions` | yes | yes, appended with in-context latents when present | optional | no |
+| `audio_input_latents` | yes | yes, as clean audio target when present | optional target | no |
+| `audio_positions` | yes | yes, passed to DiT | required by native adapter | yes |
+| `audio_context` | yes from `inputs_posi` | yes, passed to DiT | required | yes |
+| `input_latents_audio` | yes | yes, patchified and mixed into noisy audio latents when audio target exists | optional | no |
+| `denoise_mask_audio` | yes | yes, patchified; controls audio latent replacement/audio timesteps and loss mask when audio target exists | optional, required if `input_latents_audio` exists | no |
+| `inputs_nega.video_context` | yes when CFG fused | yes as unconditional video context | required only for `cfg_fused=True` | yes in CFG smoke |
+| `inputs_nega.audio_context` | yes when CFG fused | yes as unconditional audio context | required only for `cfg_fused=True` | yes in CFG smoke |
+
+### E. Video conditioning conclusion
+
+- `using_video_conditioning`: true in low-res and train-only smoke.
+- Keys used in forward: `input_latents_video`, `denoise_mask_video`.
+- These keys do not just appear in the report: `LTX2AnyFlowWrapper.anyflow_model_fn_ltx2` patchifies the mask, replaces the noisy video latent tokens with `input_latents_video` where the native denoise mask is zero, and applies the same mask to video timesteps. The same `condition_kwargs` are passed to the main prediction, central-difference `u_plus/u_minus`, and CFG-fused uncond forward.
+
+### F. Audio conditioning conclusion
+
+- `audio_present`: false in the available smoke data.
+- `audio_target_key`: null because `inputs_shared.audio_input_latents` was not produced.
+- `audio_condition_present`: false.
+- `using_audio_conditioning`: false.
+- `loss_audio`: 0.0.
+- `audio_loss_mask_ratio`: 0.0.
+- Cause: data processing emitted warnings that the four smoke MP4 files could not load audio, so native cache had no audio target or audio condition keys. This is a blocker for verifying the real audio branch with this particular smoke metadata. The code path is implemented, but full audio proof still requires a metadata/sample set whose `input_audio` can be loaded.
+
+### G. CFG fused conclusion
+
+- Default smoke keeps `CFG_FUSED=0`.
+- `CFG_FUSED=1` was tested with train-only low-res cache and passed.
+- Conditional context comes from `inputs_posi`.
+- Unconditional/negative context comes from `inputs_nega`.
+- If `cfg_fused=True` and `inputs_nega.video_context` or `inputs_nega.audio_context` is missing, the adapter raises a clear `Missing required AnyFlow native key ... in inputs_nega` error including available keys.
+
+### H. Mask conclusion
+
+- Video mask source: `inputs_shared.denoise_mask_video`.
+- Audio mask source: `inputs_shared.denoise_mask_audio` when audio target exists.
+- Shape check is implemented in `_prepare_loss_mask`: mask rank must match output rank, and each dimension must be either `1` or the output dimension. Wrong rank/dimension now raises with mask/output shapes instead of silently broadcasting.
+- `video_loss_mask_ratio`: 0.5 in the low-res/train-only smoke.
+- `audio_loss_mask_ratio`: 0.0 because audio target is absent in the current smoke data.
+
+### I. Actual runs
+
+`python -m py_compile examples/ltx2_anyflow_stage1/*.py`
+
+- Result: passed.
+
+Full smoke:
+
+```bash
+RUN_NAME=LTX2.3-I2AV-anyflow-stage1-r6-full-codex MAX_STEPS=1 SAVE_STEPS=1 TRAIN_DATASET_REPEAT=1 bash examples/ltx2_anyflow_stage1/LTX-2.3-I2AV-anyflow-stage1-lora-smoke4_4gpu.sh
+```
+
+- Result: data_process completed; 4GPU train failed during `accelerator.backward(loss)`.
+- Error summary: `torch.utils.checkpoint.CheckpointError: Recomputed values ... saved metadata shape torch.Size([4096]) ... recomputed metadata shape torch.Size([0])` at positions 25, 30, 79, 84 on all ranks. This is the full-resolution gradient-checkpointing metadata mismatch path.
+
+Low-res smoke:
+
+```bash
+RUN_NAME=LTX2.3-I2AV-anyflow-stage1-r6-lowres-codex LOW_RES_SMOKE=1 MAX_STEPS=1 SAVE_STEPS=1 TRAIN_DATASET_REPEAT=1 bash examples/ltx2_anyflow_stage1/LTX-2.3-I2AV-anyflow-stage1-lora-smoke4_4gpu.sh
+```
+
+- Result: passed; generated `native_key_report_step_000001.json`, `anyflow_stage1_log_step_000001.json`, `gradient_sanity_step_000001.json`, and `checkpoint-step_000001/anyflow_wrapper.pt`.
+
+Train-only smoke:
+
+```bash
+RUN_NAME=LTX2.3-I2AV-anyflow-stage1-r6-trainonly-codex TRAIN_ONLY=1 CACHE_DIR=./models/train/LTX2.3-I2AV-anyflow-stage1-r6-lowres-codex-cache LOW_RES_SMOKE=1 MAX_STEPS=1 SAVE_STEPS=1 TRAIN_DATASET_REPEAT=1 bash examples/ltx2_anyflow_stage1/LTX-2.3-I2AV-anyflow-stage1-lora-smoke4_4gpu.sh
+```
+
+- Result: passed from the existing native cache.
+
+CFG-fused train-only smoke:
+
+```bash
+RUN_NAME=LTX2.3-I2AV-anyflow-stage1-r6-cfg-codex TRAIN_ONLY=1 CACHE_DIR=./models/train/LTX2.3-I2AV-anyflow-stage1-r6-lowres-codex-cache LOW_RES_SMOKE=1 MAX_STEPS=1 SAVE_STEPS=1 TRAIN_DATASET_REPEAT=1 CFG_FUSED=1 CFG_SCALE=1.0 bash examples/ltx2_anyflow_stage1/LTX-2.3-I2AV-anyflow-stage1-lora-smoke4_4gpu.sh
+```
+
+- Result: passed; `using_negative_context=true` in the native key report and stage1 log.
+
+### J. JSON summaries
+
+`native_key_report_step_000001.json` from low-res smoke:
+
+- `video_target_key`: `inputs_shared.input_latents`
+- `audio_target_key`: null
+- `video_condition_keys_used_in_forward`: `["input_latents_video", "denoise_mask_video"]`
+- `audio_condition_keys_used_in_forward`: `[]`
+- `ref_condition_keys_used_in_forward`: `[]`
+- `using_video_conditioning`: true
+- `using_audio_conditioning`: false
+- `using_ref_frame_conditioning`: false
+- `using_negative_context`: false
+- `audio_present`: false
+- `audio_target_present`: false
+- `audio_condition_present`: false
+- `audio_fallback_reason`: `audio_input_latents missing from native cache/unit outputs`
+
+`anyflow_stage1_log_step_000001.json` from low-res smoke:
+
+- `loss_total`: 1.4002866744995117
+- `loss_video`: 1.4002866744995117
+- `loss_audio`: 0.0
+- `audio_present`: false
+- `audio_loss_weight`: 1.0
+- `video_loss_mask_ratio`: 0.5
+- `audio_loss_mask_ratio`: 0.0
+- `using_video_loss_mask`: 1.0
+- `using_audio_loss_mask`: 0.0
+- `using_video_conditioning`: true
+- `using_audio_conditioning`: false
+- `using_negative_context`: false
+- `u_norm_video`: 90.06635284423828
+- `target_norm_video`: 121.17963409423828
+- `u_norm_audio`: 0.0
+- `target_norm_audio`: 0.0
+
+`gradient_sanity_step_000001.json` from low-res smoke:
+
+- `total_trainable_tensors`: 2440
+- `trainable_with_grad_count`: 2440
+- `trainable_without_grad_count`: 0
+- `trainable_with_nonzero_grad_count`: 394
+- `trainable_zero_grad_count`: 2046
+- `trainable_without_grad_names` first 20: `[]`
+- `trainable_zero_grad_names` first 20: `["pipe.dit.dit.audio_adaln_single.gate", "pipe.dit.dit.audio_adaln_single.r_adaln.emb.timestep_embedder.linear_1.weight", "pipe.dit.dit.audio_adaln_single.r_adaln.emb.timestep_embedder.linear_1.bias", "pipe.dit.dit.audio_adaln_single.r_adaln.emb.timestep_embedder.linear_2.weight", "pipe.dit.dit.audio_adaln_single.r_adaln.emb.timestep_embedder.linear_2.bias", "pipe.dit.dit.audio_prompt_adaln_single.gate", "pipe.dit.dit.audio_prompt_adaln_single.r_adaln.emb.timestep_embedder.linear_1.weight", "pipe.dit.dit.audio_prompt_adaln_single.r_adaln.emb.timestep_embedder.linear_1.bias", "pipe.dit.dit.audio_prompt_adaln_single.r_adaln.emb.timestep_embedder.linear_2.weight", "pipe.dit.dit.audio_prompt_adaln_single.r_adaln.emb.timestep_embedder.linear_2.bias", "pipe.dit.dit.av_ca_video_scale_shift_adaln_single.gate", "pipe.dit.dit.av_ca_video_scale_shift_adaln_single.r_adaln.emb.timestep_embedder.linear_1.weight", "pipe.dit.dit.av_ca_video_scale_shift_adaln_single.r_adaln.emb.timestep_embedder.linear_1.bias", "pipe.dit.dit.av_ca_video_scale_shift_adaln_single.r_adaln.emb.timestep_embedder.linear_2.weight", "pipe.dit.dit.av_ca_video_scale_shift_adaln_single.r_adaln.emb.timestep_embedder.linear_2.bias", "pipe.dit.dit.av_ca_audio_scale_shift_adaln_single.gate", "pipe.dit.dit.av_ca_audio_scale_shift_adaln_single.r_adaln.emb.timestep_embedder.linear_1.weight", "pipe.dit.dit.av_ca_audio_scale_shift_adaln_single.r_adaln.emb.timestep_embedder.linear_1.bias", "pipe.dit.dit.av_ca_audio_scale_shift_adaln_single.r_adaln.emb.timestep_embedder.linear_2.weight", "pipe.dit.dit.av_ca_audio_scale_shift_adaln_single.r_adaln.emb.timestep_embedder.linear_2.bias"]`
+- `grad_norm_top20` first 20: `[["pipe.dit.dit.adaln_single.r_adaln.emb.timestep_embedder.linear_1.weight", 4.424962997436523], ["pipe.dit.dit.adaln_single.r_adaln.emb.timestep_embedder.linear_2.weight", 3.9781365394592285], ["pipe.dit.dit.adaln_single.r_adaln.emb.timestep_embedder.linear_2.bias", 1.6359113454818726], ["pipe.dit.dit.adaln_single.gate", 0.6015625], ["pipe.dit.dit.adaln_single.r_adaln.emb.timestep_embedder.linear_1.bias", 0.3508561849594116], ["pipe.dit.dit.prompt_adaln_single.r_adaln.emb.timestep_embedder.linear_1.weight", 0.12856413424015045], ["pipe.dit.dit.prompt_adaln_single.r_adaln.emb.timestep_embedder.linear_2.weight", 0.09583821147680283], ["pipe.dit.dit.transformer_blocks.22.attn1.to_v.lora_B.weight", 0.031188003718852997], ["pipe.dit.dit.transformer_blocks.21.attn1.to_v.lora_B.weight", 0.027973035350441933], ["pipe.dit.dit.transformer_blocks.22.attn1.to_out.0.lora_B.weight", 0.02425260841846466], ["pipe.dit.dit.transformer_blocks.19.attn1.to_v.lora_B.weight", 0.023984255269169807], ["pipe.dit.dit.transformer_blocks.17.attn1.to_out.0.lora_B.weight", 0.022808268666267395], ["pipe.dit.dit.transformer_blocks.20.attn1.to_v.lora_B.weight", 0.021834535524249077], ["pipe.dit.dit.transformer_blocks.0.attn1.to_v.lora_B.weight", 0.021269800141453743], ["pipe.dit.dit.transformer_blocks.18.attn1.to_out.0.lora_B.weight", 0.021209418773651123], ["pipe.dit.dit.transformer_blocks.21.attn1.to_out.0.lora_B.weight", 0.019816014915704727], ["pipe.dit.dit.transformer_blocks.0.attn1.to_out.0.lora_B.weight", 0.019594257697463036], ["pipe.dit.dit.prompt_adaln_single.r_adaln.emb.timestep_embedder.linear_2.bias", 0.019576257094740868], ["pipe.dit.dit.transformer_blocks.23.attn1.to_v.lora_B.weight", 0.018594402819871902], ["pipe.dit.dit.transformer_blocks.19.attn1.to_out.0.lora_B.weight", 0.018376661464571953]]`
+
+CFG-fused key/log summary:
+
+- `using_negative_context`: true
+- `loss_total`: 15.6661376953125
+- `video_condition_keys_used_in_forward`: `["input_latents_video", "denoise_mask_video"]`
+- `audio_present`: false
+
+### K. Remaining limitations
+
+- Stage 1 only, no DMD/on-policy.
+- Full AnyFlow reproduction still requires Stage 2 flow-map backward simulation + DMD.
+- Full-resolution smoke currently fails on the gradient-checkpointing recompute metadata mismatch described above; current workaround is `LOW_RES_SMOKE=1` or disabling the problematic full-resolution gradient checkpointing path.
+- Audio branch is implemented but not truly verified by this smoke metadata because all four smoke MP4 files failed audio loading and no `audio_input_latents`/audio condition keys were produced. This is a blocker for claiming real audio branch participation; use a smoke metadata set with loadable audio to verify nonzero `loss_audio`.

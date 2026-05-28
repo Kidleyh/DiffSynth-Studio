@@ -14,6 +14,9 @@ LOG_DIR=${LOG_DIR:-./models/train/${RUN_NAME}-logs}
 mkdir -p "$CACHE_DIR" "$OUTPUT_DIR" "$LOG_DIR"
 
 LOW_RES_SMOKE=${LOW_RES_SMOKE:-0}
+TRAIN_ONLY=${TRAIN_ONLY:-0}
+CFG_FUSED=${CFG_FUSED:-0}
+CFG_SCALE=${CFG_SCALE:-1.0}
 if [[ "$LOW_RES_SMOKE" == "1" ]]; then
   HEIGHT=${HEIGHT:-128}
   WIDTH=${WIDTH:-128}
@@ -52,18 +55,27 @@ fi
 
 echo "[1/2] AnyFlow native data_process smoke -> $CACHE_DIR"
 echo "Reference native script: examples/ltx2/model_training/full/LTX-2.3-I2AV-splited_lyh_smoke4_4gpu.sh"
-echo "LOW_RES_SMOKE=$LOW_RES_SMOKE height=$HEIGHT width=$WIDTH num_frames=$NUM_FRAMES use_gradient_checkpointing=$USE_GRADIENT_CHECKPOINTING"
-accelerate launch --num_processes 1 examples/ltx2_anyflow_stage1/train_ltx2_anyflow_stage1_native.py \
-  --dataset_base_path "" \
-  --dataset_metadata_path "$METADATA" \
-  "${COMMON_ARGS[@]}" \
-  --dataset_repeat 1 \
-  --model_id_with_origin_paths "$ENCODER_MODEL_SPEC" \
-  --learning_rate 1e-5 \
-  --num_epochs 1 \
-  --output_path "$CACHE_DIR" \
-  --task "anyflow_stage1:data_process" \
-  2>&1 | tee "$LOG_DIR/data_process.log"
+echo "LOW_RES_SMOKE=$LOW_RES_SMOKE TRAIN_ONLY=$TRAIN_ONLY CFG_FUSED=$CFG_FUSED height=$HEIGHT width=$WIDTH num_frames=$NUM_FRAMES use_gradient_checkpointing=$USE_GRADIENT_CHECKPOINTING"
+if [[ "$TRAIN_ONLY" == "1" ]]; then
+  echo "[1/2] TRAIN_ONLY=1, reusing native cache at $CACHE_DIR"
+else
+  accelerate launch --num_processes 1 examples/ltx2_anyflow_stage1/train_ltx2_anyflow_stage1_native.py \
+    --dataset_base_path "" \
+    --dataset_metadata_path "$METADATA" \
+    "${COMMON_ARGS[@]}" \
+    --dataset_repeat 1 \
+    --model_id_with_origin_paths "$ENCODER_MODEL_SPEC" \
+    --learning_rate 1e-5 \
+    --num_epochs 1 \
+    --output_path "$CACHE_DIR" \
+    --task "anyflow_stage1:data_process" \
+    2>&1 | tee "$LOG_DIR/data_process.log"
+fi
+
+ANYFLOW_TRAIN_ARGS=(--save_gradient_sanity)
+if [[ "$CFG_FUSED" == "1" ]]; then
+  ANYFLOW_TRAIN_ARGS+=(--cfg_fused --cfg_scale "$CFG_SCALE")
+fi
 
 echo "[2/2] AnyFlow native 4-GPU LoRA train smoke -> $OUTPUT_DIR"
 accelerate launch --config_file "$ACCELERATE_CONFIG" examples/ltx2_anyflow_stage1/train_ltx2_anyflow_stage1_native.py \
@@ -81,7 +93,7 @@ accelerate launch --config_file "$ACCELERATE_CONFIG" examples/ltx2_anyflow_stage
   --lora_target_modules "to_k,to_q,to_v,to_out.0" \
   --lora_rank 8 \
   --lora_alpha 8 \
-  --save_gradient_sanity \
+  "${ANYFLOW_TRAIN_ARGS[@]}" \
   --task "anyflow_stage1:train" \
   2>&1 | tee "$LOG_DIR/train.log"
 

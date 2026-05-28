@@ -22,8 +22,17 @@ def _prepare_loss_mask(mask, x: torch.Tensor):
     if mask is None:
         return None
     mask = mask.to(device=x.device, dtype=x.dtype)
-    while mask.ndim < x.ndim:
-        mask = mask.unsqueeze(1)
+    if mask.ndim != x.ndim:
+        raise ValueError(
+            "AnyFlow loss mask rank mismatch: "
+            f"mask shape {tuple(mask.shape)} vs latent/output shape {tuple(x.shape)}."
+        )
+    for dim, (mask_size, target_size) in enumerate(zip(mask.shape, x.shape)):
+        if mask_size not in (1, target_size):
+            raise ValueError(
+                "AnyFlow loss mask shape mismatch: "
+                f"mask shape {tuple(mask.shape)} vs latent/output shape {tuple(x.shape)} at dim {dim}."
+            )
     return mask.expand_as(x)
 
 

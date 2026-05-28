@@ -33,6 +33,14 @@ REF_CONDITION_KEYS = (
     "in_context_video_positions",
 )
 
+REQUIRED_KEY_SPECS = (
+    ("inputs_shared", "input_latents"),
+    ("inputs_shared", "video_positions"),
+    ("inputs_shared", "audio_positions"),
+    ("inputs_posi", "video_context"),
+    ("inputs_posi", "audio_context"),
+)
+
 
 def _available(inputs_shared, inputs_posi, inputs_nega):
     return (
@@ -55,29 +63,69 @@ def _present(mapping, key):
     return mapping is not None and key in mapping and mapping[key] is not None
 
 
-def _to_float(value):
-    return float(value.detach().float().cpu()) if hasattr(value, "detach") else float(value)
+def _mapping_by_name(name, inputs_shared, inputs_posi, inputs_nega):
+    if name == "inputs_shared":
+        return inputs_shared
+    if name == "inputs_posi":
+        return inputs_posi
+    if name == "inputs_nega":
+        return inputs_nega
+    raise KeyError(name)
 
 
-def _make_native_key_report(inputs_shared, inputs_posi, inputs_nega):
-    required = {
-        "inputs_shared.input_latents": _present(inputs_shared, "input_latents"),
-        "inputs_shared.video_positions": _present(inputs_shared, "video_positions"),
-        "inputs_shared.audio_positions": _present(inputs_shared, "audio_positions"),
-        "inputs_posi.video_context": _present(inputs_posi, "video_context"),
-        "inputs_posi.audio_context": _present(inputs_posi, "audio_context"),
-    }
-    found = [key for key in OPTIONAL_CONDITION_KEYS if _present(inputs_shared, key)]
-    missing = [key for key in OPTIONAL_CONDITION_KEYS if key not in found]
+def _qualified(name, key):
+    return f"{name}.{key}"
+
+
+def _make_native_key_report(
+    inputs_shared,
+    inputs_posi,
+    inputs_nega,
+    cfg_fused=False,
+    audio_present=False,
+    audio_fallback_reason=None,
+):
+    required_found = []
+    required_missing = []
+    for mapping_name, key in REQUIRED_KEY_SPECS:
+        mapping = _mapping_by_name(mapping_name, inputs_shared, inputs_posi, inputs_nega)
+        target = required_found if _present(mapping, key) else required_missing
+        target.append(_qualified(mapping_name, key))
+
+    optional_found = [key for key in OPTIONAL_CONDITION_KEYS if _present(inputs_shared, key)]
+    optional_missing = [key for key in OPTIONAL_CONDITION_KEYS if key not in optional_found]
+    video_used = [key for key in VIDEO_CONDITION_KEYS if key in optional_found]
+    audio_used = [key for key in AUDIO_CONDITION_KEYS if key in optional_found]
+    ref_used = [key for key in REF_CONDITION_KEYS if key in optional_found]
+
+    negative_video_context_present = _present(inputs_nega, "video_context")
+    negative_audio_context_present = _present(inputs_nega, "audio_context")
+    using_negative_context = bool(cfg_fused and negative_video_context_present and negative_audio_context_present)
+    audio_condition_present = bool(audio_used)
+
     return {
-        "required_keys_found": required,
-        "optional_condition_keys_found": found,
-        "optional_condition_keys_missing": missing,
-        "using_video_conditioning": any(key in found for key in VIDEO_CONDITION_KEYS),
-        "using_audio_conditioning": any(key in found for key in AUDIO_CONDITION_KEYS),
-        "using_ref_frame_conditioning": any(key in found for key in REF_CONDITION_KEYS),
-        "negative_context_available": _present(inputs_nega, "video_context") or _present(inputs_nega, "audio_context"),
-        "using_negative_context": False,
+        "required_keys_found": required_found,
+        "required_keys_missing": required_missing,
+        "optional_condition_keys_found": optional_found,
+        "optional_condition_keys_missing": optional_missing,
+        "video_target_key": "inputs_shared.input_latents" if _present(inputs_shared, "input_latents") else None,
+        "audio_target_key": "inputs_shared.audio_input_latents" if audio_present else None,
+        "video_context_key": "inputs_posi.video_context" if _present(inputs_posi, "video_context") else None,
+        "audio_context_key": "inputs_posi.audio_context" if _present(inputs_posi, "audio_context") else None,
+        "negative_video_context_key": "inputs_nega.video_context" if using_negative_context else None,
+        "negative_audio_context_key": "inputs_nega.audio_context" if using_negative_context else None,
+        "video_condition_keys_used_in_forward": video_used,
+        "audio_condition_keys_used_in_forward": audio_used,
+        "ref_condition_keys_used_in_forward": ref_used,
+        "using_video_conditioning": bool(video_used),
+        "using_audio_conditioning": bool(audio_used),
+        "using_ref_frame_conditioning": bool(ref_used),
+        "negative_context_available": bool(negative_video_context_present or negative_audio_context_present),
+        "using_negative_context": using_negative_context,
+        "audio_present": bool(audio_present),
+        "audio_target_present": bool(audio_present),
+        "audio_condition_present": audio_condition_present,
+        "audio_fallback_reason": audio_fallback_reason,
         "available_inputs_shared_keys": sorted(inputs_shared.keys()),
         "available_inputs_posi_keys": sorted(inputs_posi.keys()),
         "available_inputs_nega_keys": sorted(inputs_nega.keys()) if inputs_nega is not None else [],
@@ -101,8 +149,6 @@ def anyflow_stage1_native_loss(
     """Adapt native LTX2 sft cache/unit outputs to AnyFlow Stage 1 loss."""
 
     inputs_nega = inputs_nega or {}
-    native_key_report = _make_native_key_report(inputs_shared, inputs_posi, inputs_nega)
-    native_key_report["using_negative_context"] = bool(cfg_fused and native_key_report["negative_context_available"])
 
     video_latents = _require(inputs_shared, "input_latents", "inputs_shared", inputs_shared, inputs_posi, inputs_nega)
     video_context = _require(inputs_posi, "video_context", "inputs_posi", inputs_shared, inputs_posi, inputs_nega)
@@ -112,7 +158,31 @@ def anyflow_stage1_native_loss(
 
     audio_latents = inputs_shared.get("audio_input_latents")
     audio_present = audio_latents is not None
-    audio_fallback_reason = "" if audio_present else "audio_input_latents missing from native cache/unit outputs"
+    audio_condition_present = any(_present(inputs_shared, key) for key in AUDIO_CONDITION_KEYS)
+    if audio_present:
+        audio_fallback_reason = None
+    elif audio_condition_present:
+        audio_fallback_reason = (
+            "audio condition keys were present but inputs_shared.audio_input_latents is missing, "
+            "so audio target flow loss is disabled"
+        )
+    else:
+        audio_fallback_reason = "audio_input_latents missing from native cache/unit outputs"
+
+    native_key_report = _make_native_key_report(
+        inputs_shared,
+        inputs_posi,
+        inputs_nega,
+        cfg_fused=cfg_fused,
+        audio_present=audio_present,
+        audio_fallback_reason=audio_fallback_reason,
+    )
+    if native_key_report["required_keys_missing"]:
+        raise KeyError(
+            "Missing required AnyFlow native keys: "
+            f"{native_key_report['required_keys_missing']}. "
+            + _available(inputs_shared, inputs_posi, inputs_nega)
+        )
 
     negative_video_context = None
     negative_audio_context = None
@@ -151,6 +221,8 @@ def anyflow_stage1_native_loss(
     logs.update(
         {
             "audio_present": audio_present,
+            "audio_target_present": audio_present,
+            "audio_condition_present": audio_condition_present,
             "audio_fallback_reason": audio_fallback_reason,
             "audio_loss_weight": float(audio_loss_weight),
             "using_video_conditioning": native_key_report["using_video_conditioning"],

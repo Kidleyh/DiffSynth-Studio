@@ -208,6 +208,27 @@ cat models/train/LTX2.3-I2AV-anyflow-stage1-lora-smoke4/anyflow_stage1_log_step_
 cat models/train/LTX2.3-I2AV-anyflow-stage1-lora-smoke4/gradient_sanity_step_000001.json
 ```
 
+The native key report records the exact target/context keys and which optional condition keys were actually forwarded into the wrapper, including `video_condition_keys_used_in_forward`, `audio_condition_keys_used_in_forward`, `ref_condition_keys_used_in_forward`, `audio_target_key`, and `audio_fallback_reason`.
+
+Train only from an existing native cache with the shell wrapper:
+
+```bash
+TRAIN_ONLY=1 \
+CACHE_DIR=/path/to/existing-native-cache \
+RUN_NAME=LTX2.3-I2AV-anyflow-stage1-lora-smoke4-train-only \
+bash examples/ltx2_anyflow_stage1/LTX-2.3-I2AV-anyflow-stage1-lora-smoke4_4gpu.sh
+```
+
+Optional CFG-fused smoke mode uses negative context from `inputs_nega`:
+
+```bash
+TRAIN_ONLY=1 \
+CACHE_DIR=/path/to/existing-native-cache \
+CFG_FUSED=1 CFG_SCALE=1.0 \
+RUN_NAME=LTX2.3-I2AV-anyflow-stage1-lora-smoke4-cfg \
+bash examples/ltx2_anyflow_stage1/LTX-2.3-I2AV-anyflow-stage1-lora-smoke4_4gpu.sh
+```
+
 Data-process only:
 
 ```bash
