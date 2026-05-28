@@ -706,3 +706,101 @@ CFG-fused key/log summary:
 - Full AnyFlow reproduction still requires Stage 2 flow-map backward simulation + DMD.
 - Full-resolution smoke currently fails on the gradient-checkpointing recompute metadata mismatch described above; current workaround is `LOW_RES_SMOKE=1` or disabling the problematic full-resolution gradient checkpointing path.
 - Audio branch is implemented but not truly verified by this smoke metadata because all four smoke MP4 files failed audio loading and no `audio_input_latents`/audio condition keys were produced. This is a blocker for claiming real audio branch participation; use a smoke metadata set with loadable audio to verify nonzero `loss_audio`.
+
+## Round 7: Native LTX2 data alignment and low-res smoke verification
+
+### A. Files changed
+
+- `examples/ltx2_anyflow_stage1/LTX-2.3-I2AV-anyflow-stage1-lora-lyh_4gpu.sh`
+- `examples/ltx2_anyflow_stage1/codex_work.md`
+
+### B. Files outside this directory
+
+No files outside examples/ltx2_anyflow_stage1 were modified.
+
+### C. Reference script alignment
+
+- Reference script: `examples/ltx2/model_training/full/LTX-2.3-I2AV-splited_lyh_4gpu.sh`.
+- The new AnyFlow smoke script keeps the same native I2AV structure:
+  - `data_file_keys="video,input_audio"`
+  - `extra_inputs="input_audio,input_image"`
+  - 4-GPU ZeRO3 offload via `examples/ltx2/model_training/full/accelerate_config_zero3offload_4gpu.yaml`
+  - LoRA on `dit` with target modules `to_k,to_q,to_v,to_out.0`
+- Low-res smoke uses `metadata_lyh_smoke4.csv` and explicitly sets `LOW_RES_SMOKE=1`.
+
+### D. Native key report summary
+
+`native_key_report_step_000001.json` from the low-res smoke:
+
+- `using_video_conditioning`: true
+- `using_audio_conditioning`: false
+- `audio_present`: false
+- `audio_target_present`: false
+- `audio_condition_present`: false
+- `using_negative_context`: false
+- `video_condition_keys_used_in_forward`: `["input_latents_video", "denoise_mask_video"]`
+- `audio_condition_keys_used_in_forward`: `[]`
+- `optional_condition_keys_found`: `["input_latents_video", "denoise_mask_video"]`
+- `optional_condition_keys_missing`: `["ref_frames_latents", "ref_frames_positions", "in_context_video_latents", "in_context_video_positions", "input_latents_audio", "denoise_mask_audio"]`
+- `audio_fallback_reason`: `audio_input_latents missing from native cache/unit outputs`
+
+### E. AnyFlow stage1 log summary
+
+`anyflow_stage1_log_step_000001.json` from the low-res smoke:
+
+- `loss_total`: 3.8371195793151855
+- `loss_video`: 3.8371195793151855
+- `loss_audio`: 0.0
+- `audio_present`: false
+- `audio_condition_present`: false
+- `audio_fallback_reason`: `audio_input_latents missing from native cache/unit outputs`
+- `video_loss_mask_ratio`: 0.5
+- `audio_loss_mask_ratio`: 0.0
+- `using_video_loss_mask`: 1.0
+- `using_audio_loss_mask`: 0.0
+- `using_video_conditioning`: true
+- `using_audio_conditioning`: false
+- `using_negative_context`: false
+
+### F. Gradient sanity summary
+
+`gradient_sanity_step_000001.json` from the low-res smoke:
+
+- `total_trainable_tensors`: 2440
+- `trainable_with_grad_count`: 2440
+- `trainable_without_grad_count`: 0
+- `trainable_with_nonzero_grad_count`: 394
+- `trainable_zero_grad_count`: 2046
+- `trainable_without_grad_names` first 20: `[]`
+- `trainable_zero_grad_names` first 20: `["pipe.dit.dit.audio_adaln_single.gate", "pipe.dit.dit.audio_adaln_single.r_adaln.emb.timestep_embedder.linear_1.weight", "pipe.dit.dit.audio_adaln_single.r_adaln.emb.timestep_embedder.linear_1.bias", "pipe.dit.dit.audio_adaln_single.r_adaln.emb.timestep_embedder.linear_2.weight", "pipe.dit.dit.audio_adaln_single.r_adaln.emb.timestep_embedder.linear_2.bias", "pipe.dit.dit.audio_prompt_adaln_single.gate", "pipe.dit.dit.audio_prompt_adaln_single.r_adaln.emb.timestep_embedder.linear_1.weight", "pipe.dit.dit.audio_prompt_adaln_single.r_adaln.emb.timestep_embedder.linear_1.bias", "pipe.dit.dit.audio_prompt_adaln_single.r_adaln.emb.timestep_embedder.linear_2.weight", "pipe.dit.dit.audio_prompt_adaln_single.r_adaln.emb.timestep_embedder.linear_2.bias", "pipe.dit.dit.av_ca_video_scale_shift_adaln_single.gate", "pipe.dit.dit.av_ca_video_scale_shift_adaln_single.r_adaln.emb.timestep_embedder.linear_1.weight", "pipe.dit.dit.av_ca_video_scale_shift_adaln_single.r_adaln.emb.timestep_embedder.linear_1.bias", "pipe.dit.dit.av_ca_video_scale_shift_adaln_single.r_adaln.emb.timestep_embedder.linear_2.weight", "pipe.dit.dit.av_ca_video_scale_shift_adaln_single.r_adaln.emb.timestep_embedder.linear_2.bias", "pipe.dit.dit.av_ca_audio_scale_shift_adaln_single.gate", "pipe.dit.dit.av_ca_audio_scale_shift_adaln_single.r_adaln.emb.timestep_embedder.linear_1.weight", "pipe.dit.dit.av_ca_audio_scale_shift_adaln_single.r_adaln.emb.timestep_embedder.linear_1.bias", "pipe.dit.dit.av_ca_audio_scale_shift_adaln_single.r_adaln.emb.timestep_embedder.linear_2.weight", "pipe.dit.dit.av_ca_audio_scale_shift_adaln_single.r_adaln.emb.timestep_embedder.linear_2.bias"]`
+- `grad_norm_top20` first 20: `[["pipe.dit.dit.adaln_single.r_adaln.emb.timestep_embedder.linear_1.weight", 3.0488951206207275], ["pipe.dit.dit.adaln_single.r_adaln.emb.timestep_embedder.linear_2.weight", 1.8966784477233887], ["pipe.dit.dit.adaln_single.r_adaln.emb.timestep_embedder.linear_2.bias", 1.4212859869003296], ["pipe.dit.dit.adaln_single.gate", 0.87109375], ["pipe.dit.dit.adaln_single.r_adaln.emb.timestep_embedder.linear_1.bias", 0.2652214765548706], ["pipe.dit.dit.prompt_adaln_single.r_adaln.emb.timestep_embedder.linear_1.weight", 0.13142144680023193], ["pipe.dit.dit.prompt_adaln_single.r_adaln.emb.timestep_embedder.linear_2.weight", 0.0798197016119957], ["pipe.dit.dit.transformer_blocks.25.attn1.to_out.0.lora_B.weight", 0.02393363043665886], ["pipe.dit.dit.transformer_blocks.45.attn2.to_q.lora_B.weight", 0.02351904846727848], ["pipe.dit.dit.transformer_blocks.36.attn2.to_q.lora_B.weight", 0.02220844477415085], ["pipe.dit.dit.transformer_blocks.24.attn1.to_out.0.lora_B.weight", 0.019869552925229073], ["pipe.dit.dit.prompt_adaln_single.r_adaln.emb.timestep_embedder.linear_2.bias", 0.019526707008481026], ["pipe.dit.dit.transformer_blocks.0.attn1.to_v.lora_B.weight", 0.01924874261021614], ["pipe.dit.dit.transformer_blocks.25.attn1.to_v.lora_B.weight", 0.019079284742474556], ["pipe.dit.dit.transformer_blocks.23.attn1.to_out.0.lora_B.weight", 0.016496745869517326], ["pipe.dit.dit.transformer_blocks.22.attn1.to_out.0.lora_B.weight", 0.01582866534590721], ["pipe.dit.dit.transformer_blocks.43.attn2.to_q.lora_B.weight", 0.015129436738789082], ["pipe.dit.dit.transformer_blocks.35.attn2.to_q.lora_B.weight", 0.01489232387393713], ["pipe.dit.dit.transformer_blocks.24.attn1.to_v.lora_B.weight", 0.014796508476138115], ["pipe.dit.dit.transformer_blocks.23.attn1.to_v.lora_B.weight", 0.014625592157244682]`
+
+### G. Actual low-res smoke command and result
+
+Command:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+RUN_NAME=LTX2.3-I2AV-anyflow-stage1-lora-lowres-smoke \
+LOW_RES_SMOKE=1 \
+HEIGHT=128 \
+WIDTH=128 \
+NUM_FRAMES=9 \
+MAX_STEPS=1 \
+SAVE_STEPS=1 \
+TRAIN_DATASET_REPEAT=4 \
+bash examples/ltx2_anyflow_stage1/LTX-2.3-I2AV-anyflow-stage1-lora-lyh_4gpu.sh
+```
+
+Result: passed. Generated `native_key_report_step_000001.json`, `anyflow_stage1_log_step_000001.json`, `gradient_sanity_step_000001.json`, and `checkpoint-step_000001/anyflow_wrapper.pt`.
+
+### H. Full-res / TRAIN_ONLY
+
+- Full-res execution of the new script still hits the same PyTorch checkpoint recompute metadata mismatch seen earlier.
+- `TRAIN_ONLY=1` remains supported by the smoke script, but the current verification for this round was the explicit low-res run above.
+
+### I. Remaining limitations
+
+- Stage 1 only, no DMD/on-policy.
+- Full AnyFlow reproduction still requires Stage 2 flow-map backward simulation plus DMD.
+- Audio branch is still not truly exercised by this smoke metadata because the native audio operator could not load audio from the referenced MP4 files, so `audio_present=false`.
