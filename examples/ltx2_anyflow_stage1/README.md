@@ -151,12 +151,91 @@ python examples/ltx2_anyflow_stage1/sample_ltx2_anyflow_stage1.py \
   --output_path outputs/ltx2_anyflow_stage1_train/sample_8step.mp4
 ```
 
+## Native LTX2 Training Path
+
+For real LTX2 training, prefer the native-style entrypoint:
+
+`examples/ltx2_anyflow_stage1/train_ltx2_anyflow_stage1_native.py`
+
+The older `train_ltx2_anyflow_stage1.py` remains useful for tiny/synthetic unit tests and checkpoint mechanics, but real data should flow through the same `UnifiedDataset`, `data_process`, cache, and `pipe.unit_runner` path used by `examples/ltx2/model_training/train.py`.
+
+Native data flow:
+
+`UnifiedDataset/cache -> get_pipeline_inputs or cached inputs -> pipe.unit_runner -> inputs_shared/inputs_posi -> AnyFlow Stage 1 native loss adapter -> anyflow_ltx2_stage1_loss`
+
+No AnyFlow-specific cache format is introduced. `anyflow_stage1:data_process` writes the same style of cache as native LTX2 `sft:data_process`; `anyflow_stage1:train` reads that cache and replaces only the final SFT loss with Stage 1 forward flow-map training.
+
+Commands:
+
+```bash
+python -m py_compile examples/ltx2_anyflow_stage1/*.py
+```
+
+Native smoke4 shell:
+
+```bash
+bash examples/ltx2_anyflow_stage1/LTX-2.3-I2AV-anyflow-stage1-lora-smoke4_4gpu.sh
+```
+
+For a fast validation run on the 4-GPU host, the shell exposes environment knobs:
+
+```bash
+RUN_NAME=LTX2.3-I2AV-anyflow-stage1-lora-smoke4-small \
+HEIGHT=128 WIDTH=128 NUM_FRAMES=9 \
+MAX_STEPS=1 SAVE_STEPS=1 TRAIN_DATASET_REPEAT=1 \
+USE_GRADIENT_CHECKPOINTING=0 \
+bash examples/ltx2_anyflow_stage1/LTX-2.3-I2AV-anyflow-stage1-lora-smoke4_4gpu.sh
+```
+
+Data-process only:
+
+```bash
+accelerate launch --num_processes 1 examples/ltx2_anyflow_stage1/train_ltx2_anyflow_stage1_native.py \
+  --dataset_base_path "" \
+  --dataset_metadata_path examples/ltx2/model_training/full/metadata_lyh_smoke4.csv \
+  --data_file_keys "video,input_audio" \
+  --extra_inputs "input_audio,input_image" \
+  --height 512 --width 768 --num_frames 121 --frame_rate 25 \
+  --dataset_repeat 1 \
+  --model_id_with_origin_paths "DiffSynth-Studio/LTX-2.3-Repackage:text_encoder_post_modules.safetensors,DiffSynth-Studio/LTX-2.3-Repackage:video_vae_encoder.safetensors,DiffSynth-Studio/LTX-2.3-Repackage:audio_vae_encoder.safetensors,google/gemma-3-12b-it-qat-q4_0-unquantized:model-*.safetensors" \
+  --output_path ./models/train/LTX2.3-I2AV-anyflow-stage1-lora-smoke4-cache \
+  --task "anyflow_stage1:data_process"
+```
+
+Train only from native cache:
+
+```bash
+accelerate launch --config_file examples/ltx2/model_training/full/accelerate_config_zero3offload_4gpu.yaml \
+  examples/ltx2_anyflow_stage1/train_ltx2_anyflow_stage1_native.py \
+  --dataset_base_path ./models/train/LTX2.3-I2AV-anyflow-stage1-lora-smoke4-cache \
+  --data_file_keys "video,input_audio" \
+  --extra_inputs "input_audio,input_image" \
+  --height 512 --width 768 --num_frames 121 --frame_rate 25 \
+  --dataset_repeat 25 \
+  --model_id_with_origin_paths "DiffSynth-Studio/LTX-2.3-Repackage:transformer.safetensors" \
+  --initialize_model_on_cpu \
+  --learning_rate 1e-5 \
+  --num_epochs 1 \
+  --save_steps 2 \
+  --max_steps 2 \
+  --output_path ./models/train/LTX2.3-I2AV-anyflow-stage1-lora-smoke4 \
+  --lora_base_model "dit" \
+  --lora_target_modules "to_k,to_q,to_v,to_out.0" \
+  --lora_rank 8 \
+  --lora_alpha 8 \
+  --save_gradient_sanity \
+  --task "anyflow_stage1:train"
+```
+
+For formal training, change smoke LoRA settings to `--lora_rank 256 --lora_alpha 256` and increase training duration. This remains Stage 1 only: no DMD and no on-policy distillation.
+
 ## Checkpoints
 
 Each checkpoint directory contains:
 
 - `anyflow_wrapper.pt`: trainable AnyFlow and LoRA weights.
 - `optimizer.pt`: optimizer state.
+- In native DeepSpeed/ZeRO runs this sidecar records lightweight optimizer metadata; full ZeRO optimizer recovery should use the native training/checkpoint stack.
 - `training_state.json`: global step and CLI args.
 - `anyflow_config.json`: wrapper, LoRA, loss, CFG, and scheduler-relevant config.
 

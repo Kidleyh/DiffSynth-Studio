@@ -3,6 +3,12 @@ from collections import defaultdict
 import torch
 
 
+try:
+    from deepspeed.utils import safe_get_full_grad
+except Exception:  # pragma: no cover - deepspeed is optional for tiny tests.
+    safe_get_full_grad = None
+
+
 def _prefix_for_name(name):
     parts = name.split(".")
     if "lora_A" in name or "lora_B" in name:
@@ -27,10 +33,16 @@ def collect_gradient_sanity(model):
             continue
         total_trainable_tensors += 1
         by_prefix[_prefix_for_name(name)] += int(param.numel())
-        if param.grad is None:
+        grad = param.grad
+        if grad is None and safe_get_full_grad is not None:
+            try:
+                grad = safe_get_full_grad(param)
+            except Exception:
+                grad = None
+        if grad is None:
             without_grad.append(name)
             continue
-        grad_norm = float(param.grad.detach().float().norm().cpu())
+        grad_norm = float(grad.detach().float().norm().cpu())
         if grad_norm == 0.0:
             zero_grad.append(name)
         else:
@@ -49,4 +61,3 @@ def collect_gradient_sanity(model):
         "grad_norm_top20": grad_norms[:20],
         "trainable_param_count_by_prefix": dict(sorted(by_prefix.items())),
     }
-

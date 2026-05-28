@@ -96,8 +96,10 @@ class LTX2AnyFlowWrapper(torch.nn.Module):
         try:
             yield
         finally:
-            for module in self.anyflow_modules():
-                module.set_r_timestep(None)
+            # Keep the latest r_timestep available after forward so PyTorch
+            # gradient checkpoint recomputation sees the same AnyFlow r state.
+            # Later wrapper calls overwrite it before entering the DiT again.
+            pass
 
     @staticmethod
     def _normalize_time(timestep, batch_size: int, device, dtype):

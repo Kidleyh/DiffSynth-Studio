@@ -3,6 +3,10 @@ import torch.nn.functional as F
 
 
 def _broadcast_time(t: torch.Tensor, x: torch.Tensor):
+    if t.dtype == torch.bool:
+        t = t.to(device=x.device)
+    else:
+        t = t.to(device=x.device, dtype=x.dtype)
     while t.ndim < x.ndim:
         t = t.view(*t.shape, 1)
     return t
@@ -211,4 +215,3 @@ def anyflow_ltx2_stage1_loss(
         "adaptive_fallback": loss_total.new_tensor(float(adaptive_fallback)),
     }
     return loss_total, logs
-
