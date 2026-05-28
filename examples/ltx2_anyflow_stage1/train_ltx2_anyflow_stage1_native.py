@@ -98,13 +98,21 @@ class AnyFlowLTX2NativeTrainingModule(DiffusionTrainingModule):
                 "audio_context",
                 "video_positions",
                 "audio_positions",
+                "input_latents_video",
+                "denoise_mask_video",
+                "ref_frames_latents",
+                "ref_frames_positions",
+                "in_context_video_latents",
+                "in_context_video_positions",
+                "input_latents_audio",
+                "denoise_mask_audio",
                 "video_patchifier",
                 "audio_patchifier",
                 "use_gradient_checkpointing",
                 "use_gradient_checkpointing_offload",
             ),
             force_remove_params_shared=("audio_latents", "video_latents"),
-            force_remove_params_nega=("audio_context", "video_context"),
+            force_remove_params_nega=(),
         )
 
         self.task = task
@@ -127,6 +135,8 @@ class AnyFlowLTX2NativeTrainingModule(DiffusionTrainingModule):
         self.disable_time_weight = disable_time_weight
         self.disable_adaptive_weight = disable_adaptive_weight
         self.gradient_sanity_checked = False
+        self.latest_anyflow_logs = {}
+        self.latest_native_key_report = {}
         self.trainable_report = None
 
         if not task.endswith(":data_process"):
@@ -207,11 +217,12 @@ class AnyFlowLTX2NativeTrainingModule(DiffusionTrainingModule):
         return inputs_shared, inputs_posi, inputs_nega
 
     def anyflow_loss(self, pipe, inputs_shared, inputs_posi, inputs_nega):
-        loss, logs = anyflow_stage1_native_loss(
+        loss, logs, native_key_report = anyflow_stage1_native_loss(
             pipe,
             pipe.dit,
             inputs_shared,
             inputs_posi,
+            inputs_nega,
             audio_loss_weight=self.audio_loss_weight,
             boundary_prob=self.boundary_prob,
             fd_eps=self.fd_eps,
@@ -221,6 +232,7 @@ class AnyFlowLTX2NativeTrainingModule(DiffusionTrainingModule):
             use_adaptive_weight=not self.disable_adaptive_weight,
         )
         self.latest_anyflow_logs = logs
+        self.latest_native_key_report = native_key_report
         return loss
 
     def forward(self, data, inputs=None):
@@ -252,6 +264,15 @@ class AnyFlowLTX2NativeTrainingModule(DiffusionTrainingModule):
             "gradient_sanity_checked": self.gradient_sanity_checked,
             "frozen_unused_r_adaln_linear": True,
             "trainable_without_grad_policy": "allow" if getattr(args, "allow_trainable_without_grad", False) else "raise",
+            "native_conditioning_supported": True,
+            "supports_input_latents_video": True,
+            "supports_denoise_mask_video": True,
+            "supports_ref_frames": True,
+            "supports_input_latents_audio": True,
+            "supports_denoise_mask_audio": True,
+            "cfg_fused_uses_inputs_nega": True,
+            "loss_mask_supported": True,
+            "smoke_reference_script": "examples/ltx2/model_training/full/LTX-2.3-I2AV-splited_lyh_smoke4_4gpu.sh",
         }
 
 
@@ -296,6 +317,25 @@ def save_gradient_sanity(output_path, step, report):
     path.write_text(json.dumps(report, indent=2))
 
 
+def _jsonable(value):
+    if isinstance(value, torch.Tensor):
+        value = value.detach().float().cpu()
+        return value.item() if value.numel() == 1 else value.tolist()
+    if isinstance(value, dict):
+        return {str(key): _jsonable(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def save_step_json(output_path, filename, step, payload):
+    path = Path(output_path) / f"{filename}_step_{step:06d}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_jsonable(payload), indent=2))
+
+
 def launch_anyflow_native_training_task(accelerator: Accelerator, dataset, model, model_logger, args):
     optimizer = torch.optim.AdamW(model.trainable_modules(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
@@ -333,6 +373,16 @@ def launch_anyflow_native_training_task(accelerator: Accelerator, dataset, model
                         )
                         if args.save_gradient_sanity:
                             save_gradient_sanity(args.output_path, global_step, report)
+                        save_step_json(args.output_path, "native_key_report", global_step, unwrapped.latest_native_key_report)
+                        anyflow_log = dict(unwrapped.latest_anyflow_logs)
+                        anyflow_log.update(
+                            {
+                                "using_video_conditioning": unwrapped.latest_native_key_report.get("using_video_conditioning", False),
+                                "using_audio_conditioning": unwrapped.latest_native_key_report.get("using_audio_conditioning", False),
+                                "using_negative_context": unwrapped.latest_native_key_report.get("using_negative_context", False),
+                            }
+                        )
+                        save_step_json(args.output_path, "anyflow_stage1_log", global_step, anyflow_log)
                     if report["trainable_zero_grad_names"] and accelerator.is_main_process:
                         warnings.warn(
                             "Some trainable tensors have zero gradients: "

@@ -5,6 +5,12 @@ from typing import Optional
 import torch
 
 
+def _as_list(value):
+    if value is None:
+        return []
+    return value if isinstance(value, (list, tuple)) else [value]
+
+
 class AnyFlowAdaLayerNormSingle(torch.nn.Module):
     """AdaLN wrapper that blends the original t embedding with a copied r embedding."""
 
@@ -108,7 +114,7 @@ class LTX2AnyFlowWrapper(torch.nn.Module):
             timestep = timestep.expand(batch_size)
         return timestep.clamp(0.0, 1.0).view(batch_size, 1, 1)
 
-    def forward(
+    def anyflow_model_fn_ltx2(
         self,
         video_latents,
         audio_latents=None,
@@ -120,39 +126,74 @@ class LTX2AnyFlowWrapper(torch.nn.Module):
         r_timestep=None,
         video_patchifier=None,
         audio_patchifier=None,
+        input_latents_video=None,
+        denoise_mask_video=None,
+        ref_frames_latents=None,
+        ref_frames_positions=None,
+        in_context_video_latents=None,
+        in_context_video_positions=None,
+        input_latents_audio=None,
+        denoise_mask_audio=None,
         use_gradient_checkpointing=False,
         use_gradient_checkpointing_offload=False,
-        **kwargs,
     ):
         if timestep is None or r_timestep is None:
             raise ValueError("LTX2AnyFlowWrapper.forward requires both timestep and r_timestep in normalized [0, 1].")
         if video_context is None or video_positions is None:
             raise ValueError("video_context and video_positions are required for LTX2AnyFlowWrapper.forward.")
+        if video_patchifier is None:
+            raise ValueError("video_patchifier is required for native-style LTX2 AnyFlow forward.")
+
         batch_size = video_latents.shape[0]
         dtype = video_latents.dtype
         device = video_latents.device
         t = self._normalize_time(timestep, batch_size, device, dtype)
         r = self._normalize_time(r_timestep, batch_size, device, dtype)
 
-        video_shape = None
-        if video_latents.ndim == 5:
-            if video_patchifier is None:
-                raise ValueError("video_patchifier is required when video_latents are unpatchified 5D tensors.")
-            _, _, frames, height, width = video_latents.shape
-            video_shape = (frames, height, width)
-            video_latents = video_patchifier.patchify(video_latents)
+        if video_latents.ndim != 5:
+            raise ValueError("Native-style LTX2 AnyFlow forward expects unpatchified 5D video latents.")
+        _, _, frames, height, width = video_latents.shape
+        video_latents = video_patchifier.patchify(video_latents)
         seq_len_video = video_latents.shape[1]
         video_timesteps = t.repeat(1, seq_len_video, 1)
 
+        if input_latents_video is not None:
+            if denoise_mask_video is None:
+                raise ValueError("input_latents_video requires denoise_mask_video for native LTX2 conditioning.")
+            denoise_mask_video = video_patchifier.patchify(denoise_mask_video)
+            video_latents = video_latents * denoise_mask_video + video_patchifier.patchify(input_latents_video) * (1.0 - denoise_mask_video)
+            video_timesteps = denoise_mask_video * video_timesteps
+
+        ref_latents = _as_list(ref_frames_latents) + _as_list(in_context_video_latents)
+        ref_positions = _as_list(ref_frames_positions) + _as_list(in_context_video_positions)
+        if len(ref_latents) != len(ref_positions):
+            raise ValueError(
+                "Reference/in-context video conditioning has mismatched latents and positions: "
+                f"{len(ref_latents)} latents vs {len(ref_positions)} positions."
+            )
+        for ref_latent, ref_position in zip(ref_latents, ref_positions):
+            ref_latent = video_patchifier.patchify(ref_latent)
+            ref_timestep = t.repeat(1, ref_latent.shape[1], 1) * 0.0
+            video_latents = torch.cat([video_latents, ref_latent], dim=1)
+            video_positions = torch.cat([video_positions, ref_position], dim=2)
+            video_timesteps = torch.cat([video_timesteps, ref_timestep], dim=1)
+
         audio_shape = None
         if audio_latents is not None:
-            if audio_latents.ndim == 4:
-                if audio_patchifier is None:
-                    raise ValueError("audio_patchifier is required when audio_latents are unpatchified 4D tensors.")
-                _, audio_channels, _, mel_bins = audio_latents.shape
-                audio_shape = (audio_channels, mel_bins)
-                audio_latents = audio_patchifier.patchify(audio_latents)
+            if audio_patchifier is None:
+                raise ValueError("audio_patchifier is required when audio_latents are provided.")
+            if audio_latents.ndim != 4:
+                raise ValueError("Native-style LTX2 AnyFlow forward expects unpatchified 4D audio latents.")
+            _, audio_channels, _, mel_bins = audio_latents.shape
+            audio_shape = (audio_channels, mel_bins)
+            audio_latents = audio_patchifier.patchify(audio_latents)
             audio_timesteps = t.repeat(1, audio_latents.shape[1], 1)
+            if input_latents_audio is not None:
+                if denoise_mask_audio is None:
+                    raise ValueError("input_latents_audio requires denoise_mask_audio for native LTX2 conditioning.")
+                denoise_mask_audio = audio_patchifier.patchify(denoise_mask_audio)
+                audio_latents = audio_latents * denoise_mask_audio + audio_patchifier.patchify(input_latents_audio) * (1.0 - denoise_mask_audio)
+                audio_timesteps = denoise_mask_audio * audio_timesteps
         else:
             audio_timesteps = None
 
@@ -172,11 +213,42 @@ class LTX2AnyFlowWrapper(torch.nn.Module):
             )
 
         video_out = video_out[:, :seq_len_video]
-        if video_shape is not None:
-            video_out = video_patchifier.unpatchify_video(video_out, *video_shape)
+        video_out = video_patchifier.unpatchify_video(video_out, frames, height, width)
         if audio_out is not None and audio_shape is not None:
             audio_out = audio_patchifier.unpatchify_audio(audio_out, *audio_shape)
         return video_out, audio_out
+
+    def forward(
+        self,
+        video_latents,
+        audio_latents=None,
+        video_context=None,
+        audio_context=None,
+        video_positions=None,
+        audio_positions=None,
+        timestep=None,
+        r_timestep=None,
+        video_patchifier=None,
+        audio_patchifier=None,
+        use_gradient_checkpointing=False,
+        use_gradient_checkpointing_offload=False,
+        **kwargs,
+    ):
+        return self.anyflow_model_fn_ltx2(
+            video_latents=video_latents,
+            audio_latents=audio_latents,
+            video_context=video_context,
+            audio_context=audio_context,
+            video_positions=video_positions,
+            audio_positions=audio_positions,
+            timestep=timestep,
+            r_timestep=r_timestep,
+            video_patchifier=video_patchifier,
+            audio_patchifier=audio_patchifier,
+            use_gradient_checkpointing=use_gradient_checkpointing,
+            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            **kwargs,
+        )
 
 
 def trainable_state_dict(module: torch.nn.Module):

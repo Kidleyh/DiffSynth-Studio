@@ -13,15 +13,23 @@ OUTPUT_DIR=${OUTPUT_DIR:-./models/train/${RUN_NAME}}
 LOG_DIR=${LOG_DIR:-./models/train/${RUN_NAME}-logs}
 mkdir -p "$CACHE_DIR" "$OUTPUT_DIR" "$LOG_DIR"
 
-HEIGHT=${HEIGHT:-512}
-WIDTH=${WIDTH:-768}
-NUM_FRAMES=${NUM_FRAMES:-121}
+LOW_RES_SMOKE=${LOW_RES_SMOKE:-0}
+if [[ "$LOW_RES_SMOKE" == "1" ]]; then
+  HEIGHT=${HEIGHT:-128}
+  WIDTH=${WIDTH:-128}
+  NUM_FRAMES=${NUM_FRAMES:-9}
+  USE_GRADIENT_CHECKPOINTING=${USE_GRADIENT_CHECKPOINTING:-0}
+else
+  HEIGHT=${HEIGHT:-512}
+  WIDTH=${WIDTH:-768}
+  NUM_FRAMES=${NUM_FRAMES:-121}
+  USE_GRADIENT_CHECKPOINTING=${USE_GRADIENT_CHECKPOINTING:-1}
+fi
 FRAME_RATE=${FRAME_RATE:-25}
 DATASET_NUM_WORKERS=${DATASET_NUM_WORKERS:-0}
 TRAIN_DATASET_REPEAT=${TRAIN_DATASET_REPEAT:-25}
 MAX_STEPS=${MAX_STEPS:-2}
 SAVE_STEPS=${SAVE_STEPS:-2}
-USE_GRADIENT_CHECKPOINTING=${USE_GRADIENT_CHECKPOINTING:-1}
 
 ENCODER_MODEL_SPEC=${ENCODER_MODEL_SPEC:-DiffSynth-Studio/LTX-2.3-Repackage:text_encoder_post_modules.safetensors,DiffSynth-Studio/LTX-2.3-Repackage:video_vae_encoder.safetensors,DiffSynth-Studio/LTX-2.3-Repackage:audio_vae_encoder.safetensors,google/gemma-3-12b-it-qat-q4_0-unquantized:model-*.safetensors}
 TRANSFORMER_MODEL_SPEC=${TRANSFORMER_MODEL_SPEC:-DiffSynth-Studio/LTX-2.3-Repackage:transformer.safetensors}
@@ -43,6 +51,8 @@ if [[ "$USE_GRADIENT_CHECKPOINTING" == "1" ]]; then
 fi
 
 echo "[1/2] AnyFlow native data_process smoke -> $CACHE_DIR"
+echo "Reference native script: examples/ltx2/model_training/full/LTX-2.3-I2AV-splited_lyh_smoke4_4gpu.sh"
+echo "LOW_RES_SMOKE=$LOW_RES_SMOKE height=$HEIGHT width=$WIDTH num_frames=$NUM_FRAMES use_gradient_checkpointing=$USE_GRADIENT_CHECKPOINTING"
 accelerate launch --num_processes 1 examples/ltx2_anyflow_stage1/train_ltx2_anyflow_stage1_native.py \
   --dataset_base_path "" \
   --dataset_metadata_path "$METADATA" \

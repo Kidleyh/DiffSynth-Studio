@@ -159,11 +159,24 @@ For real LTX2 training, prefer the native-style entrypoint:
 
 The older `train_ltx2_anyflow_stage1.py` remains useful for tiny/synthetic unit tests and checkpoint mechanics, but real data should flow through the same `UnifiedDataset`, `data_process`, cache, and `pipe.unit_runner` path used by `examples/ltx2/model_training/train.py`.
 
+This native trainer is aligned to the user-validated reference script:
+
+`examples/ltx2/model_training/full/LTX-2.3-I2AV-splited_lyh_smoke4_4gpu.sh`
+
 Native data flow:
 
 `UnifiedDataset/cache -> get_pipeline_inputs or cached inputs -> pipe.unit_runner -> inputs_shared/inputs_posi -> AnyFlow Stage 1 native loss adapter -> anyflow_ltx2_stage1_loss`
 
 No AnyFlow-specific cache format is introduced. `anyflow_stage1:data_process` writes the same style of cache as native LTX2 `sft:data_process`; `anyflow_stage1:train` reads that cache and replaces only the final SFT loss with Stage 1 forward flow-map training.
+
+The AnyFlow wrapper mirrors native `model_fn_ltx2` conditioning:
+
+- `input_latents_video` and `denoise_mask_video` are applied to video latents and video timesteps.
+- `ref_frames_latents`, `ref_frames_positions`, `in_context_video_latents`, and `in_context_video_positions` are appended to the video token stream when present.
+- `input_latents_audio` and `denoise_mask_audio` are applied to audio latents and audio timesteps when present.
+- Stage 1 loss supports `denoise_mask_video` and `denoise_mask_audio` as loss masks and logs mask ratios.
+
+When `--cfg_fused` is enabled, conditional context comes from `inputs_posi` and negative/unconditional context comes from `inputs_nega`. With `--cfg_fused` disabled, the loss uses only the conditional forward and does not depend on `inputs_nega`.
 
 Commands:
 
@@ -183,8 +196,16 @@ For a fast validation run on the 4-GPU host, the shell exposes environment knobs
 RUN_NAME=LTX2.3-I2AV-anyflow-stage1-lora-smoke4-small \
 HEIGHT=128 WIDTH=128 NUM_FRAMES=9 \
 MAX_STEPS=1 SAVE_STEPS=1 TRAIN_DATASET_REPEAT=1 \
-USE_GRADIENT_CHECKPOINTING=0 \
+LOW_RES_SMOKE=1 \
 bash examples/ltx2_anyflow_stage1/LTX-2.3-I2AV-anyflow-stage1-lora-smoke4_4gpu.sh
+```
+
+Check the first-step JSON diagnostics:
+
+```bash
+cat models/train/LTX2.3-I2AV-anyflow-stage1-lora-smoke4/native_key_report_step_000001.json
+cat models/train/LTX2.3-I2AV-anyflow-stage1-lora-smoke4/anyflow_stage1_log_step_000001.json
+cat models/train/LTX2.3-I2AV-anyflow-stage1-lora-smoke4/gradient_sanity_step_000001.json
 ```
 
 Data-process only:

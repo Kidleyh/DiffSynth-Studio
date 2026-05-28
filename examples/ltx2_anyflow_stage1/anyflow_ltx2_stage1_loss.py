@@ -18,6 +18,31 @@ def _per_sample_mean(x: torch.Tensor):
     return x.flatten(1).mean(dim=1)
 
 
+def _prepare_loss_mask(mask, x: torch.Tensor):
+    if mask is None:
+        return None
+    mask = mask.to(device=x.device, dtype=x.dtype)
+    while mask.ndim < x.ndim:
+        mask = mask.unsqueeze(1)
+    return mask.expand_as(x)
+
+
+def _masked_per_sample_mean(x: torch.Tensor, mask):
+    if mask is None:
+        return _per_sample_mean(x)
+    mask = _prepare_loss_mask(mask, x)
+    numerator = (x * mask).flatten(1).sum(dim=1)
+    denominator = mask.flatten(1).sum(dim=1).clamp_min(1.0)
+    return numerator / denominator
+
+
+def _mask_ratio(mask, x: torch.Tensor):
+    if mask is None:
+        return x.new_tensor(1.0)
+    mask = _prepare_loss_mask(mask, x)
+    return mask.float().mean()
+
+
 def sample_t_r(batch_size, device, boundary_prob=0.5, distribution="uniform", min_delta=1e-4):
     boundary_mask = torch.rand(batch_size, device=device) < boundary_prob
     if distribution == "beta":
@@ -80,6 +105,8 @@ def anyflow_ltx2_stage1_loss(
     cfg_scale=1.0,
     negative_video_context=None,
     negative_audio_context=None,
+    video_loss_mask=None,
+    audio_loss_mask=None,
     **model_kwargs,
 ):
     device = video_latents.device
@@ -170,10 +197,13 @@ def anyflow_ltx2_stage1_loss(
         else:
             u_tgt_a = None
 
-    reg_v = _per_sample_mean(_elementwise_regression(u_v, u_tgt_v.detach(), loss_type))
+    video_loss_mask_prepared = _prepare_loss_mask(video_loss_mask, u_v) if video_loss_mask is not None else None
+    reg_v = _masked_per_sample_mean(_elementwise_regression(u_v, u_tgt_v.detach(), loss_type), video_loss_mask_prepared)
     if u_a is not None and u_tgt_a is not None:
-        reg_a = _per_sample_mean(_elementwise_regression(u_a, u_tgt_a.detach(), loss_type))
+        audio_loss_mask_prepared = _prepare_loss_mask(audio_loss_mask, u_a) if audio_loss_mask is not None else None
+        reg_a = _masked_per_sample_mean(_elementwise_regression(u_a, u_tgt_a.detach(), loss_type), audio_loss_mask_prepared)
     else:
+        audio_loss_mask_prepared = None
         reg_a = _zeros(batch_size, device)
     reg_total = reg_v + float(audio_loss_weight) * reg_a
 
@@ -213,5 +243,9 @@ def anyflow_ltx2_stage1_loss(
         "non_boundary_reg_mean": non_boundary_reg_mean.detach(),
         "boundary_reg_mean": boundary_reg_mean.detach(),
         "adaptive_fallback": loss_total.new_tensor(float(adaptive_fallback)),
+        "video_loss_mask_ratio": _mask_ratio(video_loss_mask_prepared, u_v).detach(),
+        "audio_loss_mask_ratio": _mask_ratio(audio_loss_mask_prepared, u_a).detach() if u_a is not None else loss_total.new_tensor(0.0),
+        "using_video_loss_mask": loss_total.new_tensor(float(video_loss_mask_prepared is not None)),
+        "using_audio_loss_mask": loss_total.new_tensor(float(audio_loss_mask_prepared is not None)),
     }
     return loss_total, logs
