@@ -295,6 +295,8 @@ Resume restores wrapper/LoRA weights, optimizer, and global step. Sampling reads
 
 Sampler LoRA reconstruction is compatible with native sidecar checkpoints and legacy latent-cache checkpoints. It enables LoRA when any of these are true: `use_lora=true`, `lora_base_model="dit"`, or the checkpoint state dict contains `lora_A`/`lora_B` keys. Target modules prefer native `lora_target_modules`, then legacy `lora_target_filter`, then default to `to_k,to_q,to_v,to_out.0`.
 
+If `anyflow_config.json` does not contain `lora_rank`, the sampler can infer rank from `anyflow_wrapper.pt` by reading `lora_A`/`lora_B` parameter shapes. This keeps old rank-8 smoke/native sidecar checkpoints loadable instead of incorrectly rebuilding rank-256 LoRA. New checkpoints should still rely on explicit `lora_rank` and `lora_alpha` in `anyflow_config.json`.
+
 Native `anyflow_config.json` writes both native fields (`lora_base_model`, `lora_target_modules`) and legacy aliases (`use_lora`, `lora_target_filter`) so older and newer samplers can rebuild the same wrapper structure.
 
 Large numbers of frozen base-model keys missing from `anyflow_wrapper.pt` are normal because checkpoints save only trainable parameters. Missing trainable keys or critical unexpected AnyFlow/LoRA keys raise during load.

@@ -48,8 +48,25 @@ def state_dict_has_lora(state):
     return any("lora_A" in key or "lora_B" in key for key in state.keys())
 
 
+def infer_lora_rank_from_state(state):
+    ranks = set()
+    for key, value in state.items():
+        if not hasattr(value, "shape") or len(value.shape) != 2:
+            continue
+        if "lora_A" in key:
+            ranks.add(int(value.shape[0]))
+        elif "lora_B" in key:
+            ranks.add(int(value.shape[1]))
+    if not ranks:
+        return None
+    if len(ranks) > 1:
+        raise RuntimeError(f"Inconsistent LoRA ranks found in checkpoint state dict: {sorted(ranks)}")
+    return next(iter(ranks))
+
+
 def resolve_lora_settings(cfg, state=None):
     state_has_lora = state_dict_has_lora(state) if state is not None else False
+    inferred_rank = infer_lora_rank_from_state(state) if state is not None else None
     lora_base_model = cfg.get("lora_base_model", None)
     if lora_base_model not in (None, "", "dit"):
         raise RuntimeError(
@@ -58,7 +75,15 @@ def resolve_lora_settings(cfg, state=None):
         )
 
     enabled = bool(cfg.get("use_lora", False)) or lora_base_model == "dit" or state_has_lora
-    rank = int(cfg.get("lora_rank", 256))
+    if cfg.get("lora_rank") is not None:
+        rank = int(cfg["lora_rank"])
+        rank_source = "config"
+    elif inferred_rank is not None:
+        rank = int(inferred_rank)
+        rank_source = "state-dict"
+    else:
+        rank = 256
+        rank_source = "default"
     alpha = float(cfg.get("lora_alpha", cfg.get("lora_scale", rank)))
     if cfg.get("lora_target_modules") is not None:
         target_modules = parse_name_filter(cfg.get("lora_target_modules"))
@@ -81,6 +106,7 @@ def resolve_lora_settings(cfg, state=None):
     return {
         "enabled": enabled,
         "rank": rank,
+        "rank_source": rank_source,
         "alpha": alpha,
         "target_modules": target_modules,
         "source": source,
@@ -105,11 +131,13 @@ def build_wrapper(pipe, cfg, device, dtype, state=None):
         if updated == 0:
             raise RuntimeError(
                 "Checkpoint/config/state requested LoRA, but no target Linear layers matched "
-                f"targets={lora['target_modules']} rank={lora['rank']} alpha={lora['alpha']}."
+                f"targets={lora['target_modules']} rank={lora['rank']} "
+                f"rank_source={lora['rank_source']} alpha={lora['alpha']}."
             )
         print(
             f"Injected LoRA into {updated} linear layers from {lora['source']}: "
-            f"rank={lora['rank']}, alpha={lora['alpha']}, targets={lora['target_modules']}",
+            f"rank={lora['rank']} rank_source={lora['rank_source']}, "
+            f"alpha={lora['alpha']}, targets={lora['target_modules']}",
             flush=True,
         )
     return wrapper.to(device=device, dtype=dtype)

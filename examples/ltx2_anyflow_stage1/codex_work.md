@@ -850,3 +850,34 @@ H. GPU/model-weight smoke:
 I. Remaining limitations:
 - Stage 1 only: no DMD, no discriminator, no real_score/fake_score, no on-policy distillation.
 - Full native checkpoint sampling still requires a valid LTX2 model config/weights and a real native sidecar checkpoint.
+
+
+## Round 9: State-dict LoRA rank inference for old checkpoints (2026-06-11)
+
+A. Modified files:
+- `examples/ltx2_anyflow_stage1/sample_ltx2_anyflow_stage1.py`
+- `examples/ltx2_anyflow_stage1/README.md`
+- `examples/ltx2_anyflow_stage1/codex_work.md`
+
+B. Files outside `examples/ltx2_anyflow_stage1`:
+No files outside `examples/ltx2_anyflow_stage1` were modified.
+
+C. Sampler compatibility fix:
+- Added state-dict-only LoRA rank inference from `lora_A` and `lora_B` tensor shapes.
+- `lora_A.weight` with shape `[rank, in_features]` infers `rank` from dimension 0.
+- `lora_B.weight` with shape `[out_features, rank]` infers `rank` from dimension 1.
+- If config provides `lora_rank`, config still wins over state-dict inference.
+- If state dict contains multiple inconsistent LoRA ranks, sampler raises `RuntimeError` instead of silently choosing one.
+- This avoids old rank-8 smoke checkpoints being rebuilt with default rank 256 when config is incomplete.
+
+D. Validation commands run:
+- Passed: `python -m py_compile examples/ltx2_anyflow_stage1/*.py`
+- Passed: pure-Python LoRA parser checks for `lora_A` rank inference, `lora_B` rank inference, config-over-state rank priority, alpha fallback, and inconsistent-rank error handling.
+- Output summary: empty config plus `lora_A.weight` shape `[8, 1024]` inferred rank 8; empty config plus `lora_B.weight` shape `[1024, 8]` inferred rank 8; config `lora_rank=16` overrode state-dict rank 8; mixed rank 8/16 state raised `RuntimeError`.
+
+E. GPU/model-weight smoke:
+- Not run in this round. No fresh real model config/checkpoint path was provided for latent-only sampling.
+
+F. Remaining limitations:
+- Stage 1 only: no DMD, no discriminator, no real_score/fake_score, no on-policy distillation.
+- Strict checkpoint loading remains enabled; the sampler now rebuilds the intended LoRA structure before strict load.
