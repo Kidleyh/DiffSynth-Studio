@@ -12,9 +12,9 @@ The implementation wraps DiffSynth's existing LTX2 DiT without modifying DiffSyn
 
 ## Important Training Note
 
-Stage 1 needs meaningful trainable capacity. The base LTX2 DiT is frozen by default, so real training should use LoRA. Recommended setting:
+Stage 1 needs meaningful trainable capacity. The base LTX2 DiT is frozen by default, so real training should use LoRA.
 
-`--use_lora --lora_rank 256`
+For the legacy latent-cache trainer, pass `--use_lora --lora_rank 256`. For the native trainer, `anyflow_stage1` and `anyflow_stage1:train` now default to DiT LoRA with `lora_rank=256` and `lora_target_modules=to_k,to_q,to_v,to_out.0`; smoke scripts can still override this to rank 8. `anyflow_stage1:data_process` does not install LoRA.
 
 If real training has fewer than 1M trainable parameters, the trainer raises unless `--allow_tiny_trainable_params` is explicitly passed for debugging.
 
@@ -178,6 +178,10 @@ The AnyFlow wrapper mirrors native `model_fn_ltx2` conditioning:
 
 When `--cfg_fused` is enabled, conditional context comes from `inputs_posi` and negative/unconditional context comes from `inputs_nega`. With `--cfg_fused` disabled, the loss uses only the conditional forward and does not depend on `inputs_nega`.
 
+Current command examples are written for the available 4-GPU environment. Do not assume 8 GPUs for smoke or formal commands; if global batch needs to be preserved under tighter resources, increase gradient accumulation rather than silently changing the world size. Historical notes may mention 8-GPU probes, but current native examples use 4 GPUs and the existing ZeRO3/offload 4-GPU config.
+
+Native train tasks default to DiT LoRA. Passing `--lora_base_model "dit"` in commands is still shown for readability and compatibility with older scripts, but it is no longer required for `anyflow_stage1:train`. Formal native training should use `--lora_rank 256 --lora_alpha 256`; smoke runs can override to `--lora_rank 8 --lora_alpha 8`.
+
 Commands:
 
 ```bash
@@ -269,7 +273,13 @@ accelerate launch --config_file examples/ltx2/model_training/full/accelerate_con
   --task "anyflow_stage1:train"
 ```
 
-For formal training, change smoke LoRA settings to `--lora_rank 256 --lora_alpha 256` and increase training duration. This remains Stage 1 only: no DMD and no on-policy distillation.
+For formal training, change smoke LoRA settings to `--lora_rank 256 --lora_alpha 256` and increase training duration. The train task defaults to DiT LoRA, but explicit `--lora_base_model "dit"` is harmless and documents intent. This remains Stage 1 only: no DMD and no on-policy distillation.
+
+Native sidecar checkpoint sampling example, using a single sampling process from a 4-GPU-trained checkpoint:
+
+```bash
+python examples/ltx2_anyflow_stage1/sample_ltx2_anyflow_stage1.py   --checkpoint /path/to/native/checkpoint-step_000001   --model_config_path /path/to/model_config.json   --prompt "a dog running on the grass, natural sound"   --num_inference_steps 4   --latent_rollout_only   --output_path outputs/native_checkpoint_sampling_smoke_4step
+```
 
 ## Checkpoints
 
@@ -281,7 +291,11 @@ Each checkpoint directory contains:
 - `training_state.json`: global step and CLI args.
 - `anyflow_config.json`: wrapper, LoRA, loss, CFG, and scheduler-relevant config.
 
-Resume restores wrapper/LoRA weights, optimizer, and global step. Sampling reads `anyflow_config.json`, injects LoRA if needed, then loads `anyflow_wrapper.pt`.
+Resume restores wrapper/LoRA weights, optimizer, and global step. Sampling reads `anyflow_config.json`, reads `anyflow_wrapper.pt` once, injects LoRA if needed, then strict-loads the already-read state.
+
+Sampler LoRA reconstruction is compatible with native sidecar checkpoints and legacy latent-cache checkpoints. It enables LoRA when any of these are true: `use_lora=true`, `lora_base_model="dit"`, or the checkpoint state dict contains `lora_A`/`lora_B` keys. Target modules prefer native `lora_target_modules`, then legacy `lora_target_filter`, then default to `to_k,to_q,to_v,to_out.0`.
+
+Native `anyflow_config.json` writes both native fields (`lora_base_model`, `lora_target_modules`) and legacy aliases (`use_lora`, `lora_target_filter`) so older and newer samplers can rebuild the same wrapper structure.
 
 Large numbers of frozen base-model keys missing from `anyflow_wrapper.pt` are normal because checkpoints save only trainable parameters. Missing trainable keys or critical unexpected AnyFlow/LoRA keys raise during load.
 

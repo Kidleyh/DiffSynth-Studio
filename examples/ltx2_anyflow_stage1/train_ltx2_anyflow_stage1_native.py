@@ -44,7 +44,7 @@ class AnyFlowLTX2NativeTrainingModule(DiffusionTrainingModule):
         trainable_models=None,
         lora_base_model=None,
         lora_target_modules="to_k,to_q,to_v,to_out.0",
-        lora_rank=32,
+        lora_rank=256,
         lora_alpha=None,
         lora_scale=None,
         lora_checkpoint=None,
@@ -68,6 +68,15 @@ class AnyFlowLTX2NativeTrainingModule(DiffusionTrainingModule):
         allow_tiny_trainable_params=False,
     ):
         super().__init__()
+        is_data_process = task.endswith(":data_process")
+        is_train_task = task == "anyflow_stage1" or task.endswith(":train")
+        if is_data_process:
+            effective_lora_base_model = None
+        elif is_train_task and lora_base_model is None:
+            effective_lora_base_model = "dit"
+        else:
+            effective_lora_base_model = lora_base_model
+
         model_configs = self.parse_model_configs(
             model_paths,
             model_id_with_origin_paths,
@@ -87,7 +96,7 @@ class AnyFlowLTX2NativeTrainingModule(DiffusionTrainingModule):
             task,
             self.pipe,
             trainable_models,
-            lora_base_model,
+            effective_lora_base_model,
             remove_unnecessary_params=True,
             loss_required_params=(
                 "input_latents",
@@ -121,7 +130,7 @@ class AnyFlowLTX2NativeTrainingModule(DiffusionTrainingModule):
         self.extra_inputs = extra_inputs.split(",") if extra_inputs is not None else []
         self.model_paths_raw = model_paths
         self.model_id_with_origin_paths_raw = model_id_with_origin_paths
-        self.lora_base_model = lora_base_model
+        self.lora_base_model = effective_lora_base_model
         self.lora_target_modules = lora_target_modules
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha if lora_alpha is not None else (lora_scale if lora_scale is not None else lora_rank)
@@ -251,6 +260,8 @@ class AnyFlowLTX2NativeTrainingModule(DiffusionTrainingModule):
             "model_id_with_origin_paths": self.model_id_with_origin_paths_raw,
             "lora_base_model": self.lora_base_model,
             "lora_target_modules": self.lora_target_modules,
+            "use_lora": self.lora_base_model == "dit",
+            "lora_target_filter": self.lora_target_modules,
             "lora_rank": self.lora_rank,
             "lora_alpha": self.lora_alpha,
             "gate_init": self.gate_init,
@@ -427,7 +438,11 @@ def ltx2_anyflow_native_parser():
     parser.add_argument("--allow_trainable_without_grad", action="store_true")
     parser.add_argument("--save_gradient_sanity", action="store_true", default=True)
     parser.add_argument("--max_steps", type=int, default=None)
-    parser.set_defaults(task="anyflow_stage1:train")
+    parser.set_defaults(
+        task="anyflow_stage1:train",
+        lora_rank=256,
+        lora_target_modules="to_k,to_q,to_v,to_out.0",
+    )
     return parser
 
 

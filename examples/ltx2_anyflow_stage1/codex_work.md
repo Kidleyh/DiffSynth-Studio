@@ -804,3 +804,49 @@ Result: passed. Generated `native_key_report_step_000001.json`, `anyflow_stage1_
 - Stage 1 only, no DMD/on-policy.
 - Full AnyFlow reproduction still requires Stage 2 flow-map backward simulation plus DMD.
 - Audio branch is still not truly exercised by this smoke metadata because the native audio operator could not load audio from the referenced MP4 files, so `audio_present=false`.
+
+## Round 8: Native LoRA checkpoint sampling compatibility (2026-06-11)
+
+A. Modified files:
+- `examples/ltx2_anyflow_stage1/sample_ltx2_anyflow_stage1.py`
+- `examples/ltx2_anyflow_stage1/train_ltx2_anyflow_stage1_native.py`
+- `examples/ltx2_anyflow_stage1/README.md`
+- `examples/ltx2_anyflow_stage1/codex_work.md`
+
+B. Files outside `examples/ltx2_anyflow_stage1`:
+No files outside `examples/ltx2_anyflow_stage1` were modified.
+
+C. Native sidecar checkpoint sampling fix:
+- The sampler now reads `anyflow_wrapper.pt` once before wrapper construction.
+- LoRA is enabled if `use_lora=true`, or `lora_base_model="dit"`, or the checkpoint state dict contains `lora_A`/`lora_B` keys.
+- Native `lora_target_modules` takes priority over legacy `lora_target_filter`; if neither exists, the sampler defaults to `to_k,to_q,to_v,to_out.0`.
+- `lora_alpha` falls back to `lora_scale`, then to `lora_rank`.
+- Non-DiT `lora_base_model` values now raise a clear `RuntimeError` because this Stage 1 wrapper only supports DiT LoRA.
+- If LoRA is required but injection matches zero Linear layers, sampling raises instead of silently continuing.
+
+D. Native training LoRA default:
+- `anyflow_stage1` and `anyflow_stage1:train` now default to effective `lora_base_model="dit"` when the user does not pass a LoRA base model.
+- `anyflow_stage1:data_process` keeps effective `lora_base_model=None` and does not install LoRA.
+- Native parser defaults are LoRA-friendly: `lora_rank=256`, `lora_target_modules=to_k,to_q,to_v,to_out.0`; `lora_alpha` still falls back to rank.
+- Existing smoke scripts can continue overriding rank/alpha to 8.
+
+E. `anyflow_config.json` compatibility aliases:
+- Native checkpoints still save `lora_base_model`, `lora_target_modules`, `lora_rank`, and `lora_alpha`.
+- Native checkpoints now also save legacy aliases `use_lora` and `lora_target_filter`.
+
+F. README update:
+- README now states native train tasks default to DiT LoRA while data_process does not need LoRA.
+- README now describes native/legacy/state-dict LoRA detection for sampling.
+- README command examples are written for the current 4-GPU environment; 8-GPU configuration is not assumed in current smoke/formal examples.
+
+G. Validation commands run:
+- Passed: `python -m py_compile examples/ltx2_anyflow_stage1/*.py`
+- Passed: pure-Python `resolve_lora_settings` checks for native config, legacy config, state-dict inference, native-over-legacy target priority, and `lora_alpha` fallback to rank.
+- Pure-Python check output summary: native enabled from `lora_base_model=dit`; legacy enabled from `use_lora=True`; state-dict enabled from `lora_A`; native `lora_target_modules` wins over legacy `lora_target_filter`; missing alpha falls back to rank.
+
+H. GPU/model-weight smoke:
+- Not run in this round. The requested minimum validation is compile plus pure-Python LoRA config parsing; no fresh real model checkpoint path was provided for latent-only sampling.
+
+I. Remaining limitations:
+- Stage 1 only: no DMD, no discriminator, no real_score/fake_score, no on-policy distillation.
+- Full native checkpoint sampling still requires a valid LTX2 model config/weights and a real native sidecar checkpoint.

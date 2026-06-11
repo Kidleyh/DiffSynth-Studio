@@ -39,29 +39,87 @@ def load_anyflow_config(checkpoint):
     return json.loads(cfg_path.read_text())
 
 
-def build_wrapper(pipe, cfg, device, dtype):
+def load_anyflow_state(checkpoint):
+    _, state_path, _ = checkpoint_paths(checkpoint)
+    return torch.load(state_path, map_location="cpu")
+
+
+def state_dict_has_lora(state):
+    return any("lora_A" in key or "lora_B" in key for key in state.keys())
+
+
+def resolve_lora_settings(cfg, state=None):
+    state_has_lora = state_dict_has_lora(state) if state is not None else False
+    lora_base_model = cfg.get("lora_base_model", None)
+    if lora_base_model not in (None, "", "dit"):
+        raise RuntimeError(
+            "AnyFlow Stage 1 sampling currently supports LoRA injection on DiT only, "
+            f"but checkpoint config has lora_base_model={lora_base_model!r}."
+        )
+
+    enabled = bool(cfg.get("use_lora", False)) or lora_base_model == "dit" or state_has_lora
+    rank = int(cfg.get("lora_rank", 256))
+    alpha = float(cfg.get("lora_alpha", cfg.get("lora_scale", rank)))
+    if cfg.get("lora_target_modules") is not None:
+        target_modules = parse_name_filter(cfg.get("lora_target_modules"))
+        source = "native-config"
+    elif cfg.get("lora_target_filter") is not None:
+        target_modules = parse_name_filter(cfg.get("lora_target_filter"))
+        source = "legacy-config"
+    else:
+        target_modules = parse_name_filter("to_k,to_q,to_v,to_out.0")
+        if lora_base_model == "dit":
+            source = "native-config"
+        elif bool(cfg.get("use_lora", False)):
+            source = "legacy-config"
+        elif state_has_lora:
+            source = "state-dict"
+        else:
+            source = "disabled"
+    if not enabled:
+        source = "disabled"
+    return {
+        "enabled": enabled,
+        "rank": rank,
+        "alpha": alpha,
+        "target_modules": target_modules,
+        "source": source,
+    }
+
+
+def build_wrapper(pipe, cfg, device, dtype, state=None):
     wrapper_cfg = cfg.get("wrapper_config", {})
     wrapper = LTX2AnyFlowWrapper(
         pipe.dit,
         gate=float(wrapper_cfg.get("gate", cfg.get("gate_init", 0.25))),
         freeze_base=bool(wrapper_cfg.get("freeze_base", True)),
     )
-    if cfg.get("use_lora", False):
+    lora = resolve_lora_settings(cfg, state=state)
+    if lora["enabled"]:
         updated = inject_lora_linear(
             wrapper.dit,
-            rank=int(cfg.get("lora_rank", 256)),
-            alpha=float(cfg.get("lora_alpha", cfg.get("lora_scale", cfg.get("lora_rank", 256)))),
-            name_filter=parse_name_filter(cfg.get("lora_target_filter", ("attn", "ff", "proj"))),
+            rank=lora["rank"],
+            alpha=lora["alpha"],
+            name_filter=lora["target_modules"],
         )
-        print(f"injected LoRA into {updated} linear layers from checkpoint config", flush=True)
         if updated == 0:
-            raise RuntimeError("Checkpoint config requested LoRA, but no target Linear layers matched.")
+            raise RuntimeError(
+                "Checkpoint/config/state requested LoRA, but no target Linear layers matched "
+                f"targets={lora['target_modules']} rank={lora['rank']} alpha={lora['alpha']}."
+            )
+        print(
+            f"Injected LoRA into {updated} linear layers from {lora['source']}: "
+            f"rank={lora['rank']}, alpha={lora['alpha']}, targets={lora['target_modules']}",
+            flush=True,
+        )
     return wrapper.to(device=device, dtype=dtype)
 
 
-def load_anyflow_checkpoint(wrapper, checkpoint):
-    _, state_path, _ = checkpoint_paths(checkpoint)
-    state = torch.load(state_path, map_location="cpu")
+def load_anyflow_checkpoint(wrapper, checkpoint=None, state=None):
+    if state is None:
+        if checkpoint is None:
+            raise ValueError("Either checkpoint or state must be provided to load_anyflow_checkpoint.")
+        state = load_anyflow_state(checkpoint)
     load_trainable_state_dict(wrapper, state, strict_trainable=True)
 
 
@@ -163,13 +221,14 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = dtype_from_arg(args.dtype) if device == "cuda" else torch.float32
     cfg = load_anyflow_config(args.checkpoint)
+    state = load_anyflow_state(args.checkpoint)
     pipe = LTX2AudioVideoPipeline.from_pretrained(
         torch_dtype=dtype,
         device=device,
         model_configs=load_model_configs(args.model_config_path),
     )
-    wrapper = build_wrapper(pipe, cfg, device, dtype)
-    load_anyflow_checkpoint(wrapper, args.checkpoint)
+    wrapper = build_wrapper(pipe, cfg, device, dtype, state=state)
+    load_anyflow_checkpoint(wrapper, state=state)
     wrapper.eval()
 
     inputs_shared, inputs_posi = prepare_pipeline_inputs(pipe, args, device)
