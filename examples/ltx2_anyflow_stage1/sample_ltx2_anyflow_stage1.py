@@ -84,7 +84,15 @@ def resolve_lora_settings(cfg, state=None):
     else:
         rank = 256
         rank_source = "default"
-    alpha = float(cfg.get("lora_alpha", cfg.get("lora_scale", rank)))
+    alpha_value = cfg.get("lora_alpha", None)
+    alpha_source = "config"
+    if alpha_value is None:
+        alpha_value = cfg.get("lora_scale", None)
+        alpha_source = "legacy-config"
+    if alpha_value is None:
+        alpha_value = rank
+        alpha_source = "rank"
+    alpha = float(alpha_value)
     if cfg.get("lora_target_modules") is not None:
         target_modules = parse_name_filter(cfg.get("lora_target_modules"))
         source = "native-config"
@@ -108,6 +116,7 @@ def resolve_lora_settings(cfg, state=None):
         "rank": rank,
         "rank_source": rank_source,
         "alpha": alpha,
+        "alpha_source": alpha_source,
         "target_modules": target_modules,
         "source": source,
     }
@@ -132,12 +141,14 @@ def build_wrapper(pipe, cfg, device, dtype, state=None):
             raise RuntimeError(
                 "Checkpoint/config/state requested LoRA, but no target Linear layers matched "
                 f"targets={lora['target_modules']} rank={lora['rank']} "
-                f"rank_source={lora['rank_source']} alpha={lora['alpha']}."
+                f"rank_source={lora['rank_source']} alpha={lora['alpha']} "
+                f"alpha_source={lora['alpha_source']}."
             )
         print(
             f"Injected LoRA into {updated} linear layers from {lora['source']}: "
             f"rank={lora['rank']} rank_source={lora['rank_source']}, "
-            f"alpha={lora['alpha']}, targets={lora['target_modules']}",
+            f"alpha={lora['alpha']} alpha_source={lora['alpha_source']}, "
+            f"targets={lora['target_modules']}",
             flush=True,
         )
     return wrapper.to(device=device, dtype=dtype)

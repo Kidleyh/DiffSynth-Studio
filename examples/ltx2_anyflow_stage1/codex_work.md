@@ -881,3 +881,30 @@ E. GPU/model-weight smoke:
 F. Remaining limitations:
 - Stage 1 only: no DMD, no discriminator, no real_score/fake_score, no on-policy distillation.
 - Strict checkpoint loading remains enabled; the sampler now rebuilds the intended LoRA structure before strict load.
+
+
+## Round 10: LoRA alpha None fallback robustness (2026-06-11)
+
+A. Modified files:
+- `examples/ltx2_anyflow_stage1/sample_ltx2_anyflow_stage1.py`
+- `examples/ltx2_anyflow_stage1/codex_work.md`
+
+B. Files outside `examples/ltx2_anyflow_stage1`:
+No files outside `examples/ltx2_anyflow_stage1` were modified.
+
+C. Fix:
+- Fixed `resolve_lora_settings()` so explicit JSON null values such as `"lora_alpha": null` do not trigger `float(None)`.
+- Alpha fallback order is now explicit: `lora_alpha -> lora_scale -> rank`.
+- The sampler returns and logs `alpha_source` as `config`, `legacy-config`, or `rank`.
+
+D. Validation commands run:
+- Passed: `python -m py_compile examples/ltx2_anyflow_stage1/*.py`
+- Passed: pure-Python LoRA alpha fallback checks for null alpha/null scale, null alpha with legacy scale, config alpha priority, and state-dict rank alpha fallback.
+- Output summary: `lora_alpha=None,lora_scale=None,lora_rank=8` produced alpha 8 from rank; `lora_alpha=None,lora_scale=4,lora_rank=8` produced alpha 4 from legacy config; `lora_alpha=16,lora_scale=4,lora_rank=8` produced alpha 16 from config; empty config plus state-dict rank 8 produced alpha 8 from rank.
+
+E. GPU/model-weight smoke:
+- Not run in this round. This was a pure sampler config parsing robustness fix, and no fresh real model config/checkpoint path was provided.
+
+F. Remaining limitations:
+- Stage 1 only: no DMD, no discriminator, no real_score/fake_score, no on-policy distillation.
+- Strict checkpoint loading remains enabled.
