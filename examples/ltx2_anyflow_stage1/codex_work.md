@@ -908,3 +908,59 @@ E. GPU/model-weight smoke:
 F. Remaining limitations:
 - Stage 1 only: no DMD, no discriminator, no real_score/fake_score, no on-policy distillation.
 - Strict checkpoint loading remains enabled.
+
+
+## Round 11: Low-res 4-GPU train-one-step plus sampling validation script (2026-06-11)
+
+A. Modified files:
+- `examples/ltx2_anyflow_stage1/test_lowres_train1_sample_4gpu.sh`
+- `examples/ltx2_anyflow_stage1/README.md`
+- `examples/ltx2_anyflow_stage1/codex_work.md`
+
+B. Files outside `examples/ltx2_anyflow_stage1`:
+No files outside `examples/ltx2_anyflow_stage1` were modified.
+
+C. New test script coverage:
+- Runs `python -m py_compile examples/ltx2_anyflow_stage1/*.py`.
+- Uses the existing 4-GPU low-res native smoke script with `LOW_RES_SMOKE=1`, `HEIGHT=128`, `WIDTH=128`, `NUM_FRAMES=9`, `MAX_STEPS=1`, `SAVE_STEPS=1`, and `TRAIN_DATASET_REPEAT=1`.
+- Checks `checkpoint-step_000001/anyflow_wrapper.pt` and `checkpoint-step_000001/anyflow_config.json`.
+- Checks `gradient_sanity_step_000001.json`, `native_key_report_step_000001.json`, and `anyflow_stage1_log_step_000001.json`.
+- Validates key JSON fields: DiT LoRA enabled, `lora_rank=8`, `trainable_without_grad_count=0`, finite `loss_total`, and prints `audio_present` when available.
+- Runs `sample_ltx2_anyflow_stage1.py --latent_rollout_only --num_inference_steps 4` from the native sidecar checkpoint.
+- Checks `rollout_stats.json`, `final_video_latents.pt`, and `final_audio_latents.pt`.
+
+D. Validation commands run:
+- Passed: `python -m py_compile examples/ltx2_anyflow_stage1/*.py`
+- Passed: `bash -n examples/ltx2_anyflow_stage1/test_lowres_train1_sample_4gpu.sh`
+
+E. Full train+sample execution:
+- Not run in this round because a real `MODEL_CONFIG_PATH` was not provided. The script requires `MODEL_CONFIG_PATH=/path/to/model_config.json` for the sampler stage.
+
+F. Remaining limitations:
+- Stage 1 only: no DMD, no discriminator, no real_score/fake_score, no on-policy distillation.
+- The script is a low-resolution 1-step link validation, not a quality benchmark.
+- Current defaults remain 4 GPU, not 8 GPU.
+
+
+## Round 12: Auto-generated sampler model config for low-res validation (2026-06-11)
+
+A. Modified files:
+- `examples/ltx2_anyflow_stage1/test_lowres_train1_sample_4gpu.sh`
+- `examples/ltx2_anyflow_stage1/README.md`
+- `examples/ltx2_anyflow_stage1/codex_work.md`
+
+B. Files outside `examples/ltx2_anyflow_stage1`:
+No files outside `examples/ltx2_anyflow_stage1` were modified.
+
+C. Change:
+- The low-res train-one-step plus sampling script no longer requires `MODEL_CONFIG_PATH` to be provided.
+- If `MODEL_CONFIG_PATH` is unset, it writes `${LOG_DIR}/sample_model_config.json` from `SAMPLE_MODEL_SPEC`.
+- The default `SAMPLE_MODEL_SPEC` mirrors the existing LTX-2.3 native scripts: text encoder post modules, transformer, video/audio VAE encoders, and Gemma model shards.
+- Users can still override `MODEL_CONFIG_PATH` explicitly.
+
+D. Validation commands run:
+- Passed: `bash -n examples/ltx2_anyflow_stage1/test_lowres_train1_sample_4gpu.sh`
+- Passed: `python -m py_compile examples/ltx2_anyflow_stage1/*.py`
+
+E. Full train+sample execution:
+- Not run in this round. The script is now self-contained with default model specs, but running it would launch the full low-res 4-GPU train+sample smoke.

@@ -204,6 +204,21 @@ LOW_RES_SMOKE=1 \
 bash examples/ltx2_anyflow_stage1/LTX-2.3-I2AV-anyflow-stage1-lora-smoke4_4gpu.sh
 ```
 
+One-step low-res native train + sample validation:
+
+```bash
+bash examples/ltx2_anyflow_stage1/test_lowres_train1_sample_4gpu.sh
+```
+
+The script can also use an explicit sampler config if needed:
+
+```bash
+MODEL_CONFIG_PATH=/path/to/model_config.json \
+bash examples/ltx2_anyflow_stage1/test_lowres_train1_sample_4gpu.sh
+```
+
+By default it generates a temporary sampler model config from the same LTX-2.3 `model_id:origin_file_pattern` specs used by the native training scripts. This validation script uses 4 GPUs for native training, defaults to `128x128x9`, trains only 1 step with LoRA rank 8, checks the native sidecar checkpoint and first-step JSON logs, then runs 4-step `--latent_rollout_only` sampling from `checkpoint-step_000001`. The sampling stage validates native sidecar LoRA injection, strict checkpoint loading, and latent rollout output files.
+
 Check the first-step JSON diagnostics:
 
 ```bash
