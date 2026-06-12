@@ -11,6 +11,8 @@ class LoRALinear(torch.nn.Module):
         self.lora_B = torch.nn.Linear(self.rank, base.out_features, bias=False)
         torch.nn.init.kaiming_uniform_(self.lora_A.weight, a=5 ** 0.5)
         torch.nn.init.zeros_(self.lora_B.weight)
+        self.lora_A.to(device=base.weight.device, dtype=base.weight.dtype)
+        self.lora_B.to(device=base.weight.device, dtype=base.weight.dtype)
         for param in self.base.parameters():
             param.requires_grad = False
 
@@ -19,7 +21,10 @@ class LoRALinear(torch.nn.Module):
         return self.alpha / self.rank
 
     def forward(self, x):
-        return self.base(x) + self.lora_B(self.lora_A(x)) * self.scale
+        base_out = self.base(x)
+        lora_x = x.to(dtype=self.lora_A.weight.dtype)
+        lora_out = self.lora_B(self.lora_A(lora_x)) * self.scale
+        return base_out + lora_out.to(dtype=base_out.dtype)
 
 
 def parse_name_filter(value):

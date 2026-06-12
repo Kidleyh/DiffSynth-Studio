@@ -306,6 +306,52 @@ Native sidecar checkpoint sampling example, using a single sampling process from
 python examples/ltx2_anyflow_stage1/sample_ltx2_anyflow_stage1.py   --checkpoint /path/to/native/checkpoint-step_000001   --model_config_path /path/to/model_config.json   --prompt "a dog running on the grass, natural sound"   --num_inference_steps 4   --latent_rollout_only   --output_path outputs/native_checkpoint_sampling_smoke_4step
 ```
 
+## Gradient Checkpointing Diagnostic Matrix
+
+Codex should not directly run these GPU diagnostics unless explicitly asked. Run the matrix manually, then ask Codex to read the logs.
+
+A. 4GPU ZeRO3 + gradient checkpointing control:
+
+```bash
+USE_GRADIENT_CHECKPOINTING=1 \
+RUN_NAME=LTX2.3-I2AV-anyflow-stage1-lowres-gc-train1-4gpu-zero3 \
+bash examples/ltx2_anyflow_stage1/test_lowres_gc_train1_4gpu.sh
+```
+
+Train log:
+
+```bash
+./models/train/LTX2.3-I2AV-anyflow-stage1-lowres-gc-train1-4gpu-zero3-logs/train.log
+```
+
+B. 1GPU no-DeepSpeed + gradient checkpointing localization:
+
+```bash
+USE_GRADIENT_CHECKPOINTING=1 \
+RUN_NAME=LTX2.3-I2AV-anyflow-stage1-lowres-gc-train1-1gpu-nodeepspeed \
+bash examples/ltx2_anyflow_stage1/test_lowres_gc_train1_1gpu_nodeepspeed.sh
+```
+
+Train log:
+
+```bash
+./models/train/LTX2.3-I2AV-anyflow-stage1-lowres-gc-train1-1gpu-nodeepspeed-logs/train.log
+```
+
+Summarize either run:
+
+```bash
+python examples/ltx2_anyflow_stage1/summarize_gc_diagnostic_logs.py \
+  --log_dir ./models/train/LTX2.3-I2AV-anyflow-stage1-lowres-gc-train1-1gpu-nodeepspeed-logs \
+  --output_dir ./models/train/LTX2.3-I2AV-anyflow-stage1-lowres-gc-train1-1gpu-nodeepspeed
+```
+
+Interpretation:
+
+- If 1GPU no-DeepSpeed passes and 4GPU ZeRO3 fails, the likely issue is ZeRO3 partitioning plus PyTorch checkpoint recompute.
+- If 1GPU no-DeepSpeed also fails, the issue is still in the LTX2 main forward / AnyFlow wrapper checkpoint path.
+- If 1GPU OOMs, record the OOM and design a smaller diagnostic case before changing DeepSpeed config.
+
 ## Checkpoints
 
 Each checkpoint directory contains:
