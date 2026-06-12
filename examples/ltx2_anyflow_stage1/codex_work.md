@@ -1150,3 +1150,48 @@ D. Next recommended work:
 
 E. Status of the original diagnostic-script task:
 - Complete. The 1GPU no-DeepSpeed script, log summarizer, README diagnostic matrix, and codex_work records are in place.
+
+
+## Round 19: 4GPU ZeRO2/offload GC diagnostic (2026-06-12)
+
+A. Modified/new files:
+- `examples/ltx2_anyflow_stage1/test_lowres_gc_train1_4gpu_zero2.sh`
+- `examples/ltx2_anyflow_stage1/summarize_gc_diagnostic_logs.py`
+- `examples/ltx2_anyflow_stage1/README.md`
+- `examples/ltx2_anyflow_stage1/codex_work.md`
+
+B. ZeRO2 config:
+- Reused existing `examples/ltx2/model_training/full/accelerate_config_zero2offload_4gpu.yaml`.
+- No new DeepSpeed config was needed.
+- The config uses 4 processes, DeepSpeed ZeRO stage 2, CPU optimizer/param offload, and no ZeRO3 init.
+
+C. New diagnostic script:
+- Added `test_lowres_gc_train1_4gpu_zero2.sh`.
+- It runs low-res `128x128x9`, `MAX_STEPS=1`, `SAVE_STEPS=1`, `TRAIN_DATASET_REPEAT=1`, `USE_GRADIENT_CHECKPOINTING=1`, LoRA rank/alpha 8.
+- It uses `accelerate_config_zero2offload_4gpu.yaml` for train.
+- It saves `env.txt`, `command.txt`, `data_process.log`, and `train.log`.
+- It checks checkpoint files, finite `loss_total`, and GC policy fields after a successful run.
+
+D. Summarizer update:
+- Added `run_name` to the summary output so ZeRO2/ZeRO3/1GPU logs are easier to compare.
+
+E. Validation commands:
+- Passed: `python -m py_compile examples/ltx2_anyflow_stage1/*.py`
+- Passed: `bash -n examples/ltx2_anyflow_stage1/test_lowres_gc_train1_4gpu_zero2.sh`
+- Passed: `USE_GRADIENT_CHECKPOINTING=1 RUN_NAME=LTX2.3-I2AV-anyflow-stage1-lowres-gc-train1-4gpu-zero2 bash examples/ltx2_anyflow_stage1/test_lowres_gc_train1_4gpu_zero2.sh`
+- Passed: `python examples/ltx2_anyflow_stage1/summarize_gc_diagnostic_logs.py --log_dir ./models/train/LTX2.3-I2AV-anyflow-stage1-lowres-gc-train1-4gpu-zero2-logs --output_dir ./models/train/LTX2.3-I2AV-anyflow-stage1-lowres-gc-train1-4gpu-zero2`
+
+F. ZeRO2 run summary:
+- Conclusion: `SUCCESS`.
+- Checkpoint: `models/train/LTX2.3-I2AV-anyflow-stage1-lowres-gc-train1-4gpu-zero2/checkpoint-step_000001`.
+- `loss_total`: 0.7692892551422119.
+- `gradient_checkpointing_main_forward`: 1.0.
+- `gradient_checkpointing_target_forward`: 0.0.
+- `gradient_checkpointing_uncond_forward`: -1.0.
+- No `CheckpointError`, no saved/recomputed metadata mismatch, no OOM, no dtype mismatch.
+
+G. Matrix conclusion:
+- 1GPU no-DeepSpeed + GC: `SUCCESS`.
+- 4GPU ZeRO2/offload + GC: `SUCCESS`.
+- 4GPU ZeRO3 + GC: `CheckpointError` with `[4096] -> [0]` metadata mismatch.
+- The failure is effectively isolated to ZeRO3 parameter partitioning plus PyTorch checkpoint recompute.

@@ -338,7 +338,21 @@ Train log:
 ./models/train/LTX2.3-I2AV-anyflow-stage1-lowres-gc-train1-1gpu-nodeepspeed-logs/train.log
 ```
 
-Summarize either run:
+C. 4GPU ZeRO2/offload + gradient checkpointing diagnostic:
+
+```bash
+USE_GRADIENT_CHECKPOINTING=1 \
+RUN_NAME=LTX2.3-I2AV-anyflow-stage1-lowres-gc-train1-4gpu-zero2 \
+bash examples/ltx2_anyflow_stage1/test_lowres_gc_train1_4gpu_zero2.sh
+```
+
+Train log:
+
+```bash
+./models/train/LTX2.3-I2AV-anyflow-stage1-lowres-gc-train1-4gpu-zero2-logs/train.log
+```
+
+Summarize any run:
 
 ```bash
 python examples/ltx2_anyflow_stage1/summarize_gc_diagnostic_logs.py \
@@ -348,7 +362,8 @@ python examples/ltx2_anyflow_stage1/summarize_gc_diagnostic_logs.py \
 
 Interpretation:
 
-- If 1GPU no-DeepSpeed passes and 4GPU ZeRO3 fails, the likely issue is ZeRO3 partitioning plus PyTorch checkpoint recompute.
+- If 1GPU no-DeepSpeed passes, ZeRO2 + GC passes, and ZeRO3 + GC fails, the issue is effectively isolated to ZeRO3 parameter partitioning plus PyTorch checkpoint recompute.
+- If 1GPU no-DeepSpeed passes but ZeRO2 + GC also fails, the issue is likely broader multi-GPU DeepSpeed plus PyTorch checkpointing, not only ZeRO3.
 - If 1GPU no-DeepSpeed also fails, the issue is still in the LTX2 main forward / AnyFlow wrapper checkpoint path.
 - If 1GPU OOMs, record the OOM and design a smaller diagnostic case before changing DeepSpeed config.
 

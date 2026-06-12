@@ -73,6 +73,7 @@ def main():
         conclusion = "UNKNOWN_FAILURE"
 
     summary = {
+        "run_name": output_dir.name,
         "log_dir": str(log_dir),
         "output_dir": str(output_dir),
         "train_log": str(train_log),
