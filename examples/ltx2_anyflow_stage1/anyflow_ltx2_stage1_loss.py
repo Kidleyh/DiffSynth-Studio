@@ -144,7 +144,11 @@ def anyflow_ltx2_stage1_loss(
         rb_a = None
         v_a = None
 
-    def call_raw(v_latents, a_latents, t_value, r_value, v_ctx, a_ctx):
+    def call_raw(v_latents, a_latents, t_value, r_value, v_ctx, a_ctx, *, use_checkpoint_override=None):
+        local_kwargs = dict(model_kwargs)
+        if use_checkpoint_override is not None:
+            local_kwargs["use_gradient_checkpointing"] = bool(use_checkpoint_override)
+            local_kwargs["use_gradient_checkpointing_offload"] = False
         return model(
             video_latents=v_latents,
             audio_latents=a_latents,
@@ -156,30 +160,52 @@ def anyflow_ltx2_stage1_loss(
             r_timestep=r_value,
             video_patchifier=video_patchifier,
             audio_patchifier=audio_patchifier,
-            **model_kwargs,
+            **local_kwargs,
         )
 
-    def call(v_latents, a_latents, t_value, r_value):
-        u_v_cond, u_a_cond = call_raw(v_latents, a_latents, t_value, r_value, video_context, audio_context)
+    def call(v_latents, a_latents, t_value, r_value, *, train_forward=True):
+        if train_forward:
+            u_v_cond, u_a_cond = call_raw(
+                v_latents,
+                a_latents,
+                t_value,
+                r_value,
+                video_context,
+                audio_context,
+                use_checkpoint_override=None,
+            )
+        else:
+            with torch.no_grad():
+                u_v_cond, u_a_cond = call_raw(
+                    v_latents,
+                    a_latents,
+                    t_value,
+                    r_value,
+                    video_context,
+                    audio_context,
+                    use_checkpoint_override=False,
+                )
         if not cfg_fused:
             return u_v_cond, u_a_cond
         if negative_video_context is None or negative_audio_context is None:
             raise ValueError("cfg_fused=True requires negative_video_context and negative_audio_context.")
-        u_v_uncond, u_a_uncond = call_raw(
-            v_latents,
-            a_latents,
-            t_value,
-            r_value,
-            negative_video_context,
-            negative_audio_context,
-        )
+        with torch.no_grad():
+            u_v_uncond, u_a_uncond = call_raw(
+                v_latents,
+                a_latents,
+                t_value,
+                r_value,
+                negative_video_context,
+                negative_audio_context,
+                use_checkpoint_override=False,
+            )
         u_v = _anyflow_guidance_fused(u_v_cond, u_v_uncond, cfg_scale)
         u_a = None
         if u_a_cond is not None and u_a_uncond is not None:
             u_a = _anyflow_guidance_fused(u_a_cond, u_a_uncond, cfg_scale)
         return u_v, u_a
 
-    u_v, u_a = call(zt_v, zt_a, t, r)
+    u_v, u_a = call(zt_v, zt_a, t, r, train_forward=True)
 
     fd_v = _broadcast_time(fd_eps_t, zt_v)
     z_plus_v = zt_v + fd_v * v_v
@@ -192,8 +218,8 @@ def anyflow_ltx2_stage1_loss(
         z_plus_a = z_minus_a = None
 
     with torch.no_grad():
-        u_plus_v, u_plus_a = call(z_plus_v, z_plus_a, (t + fd_eps_t).clamp_max(1.0), r)
-        u_minus_v, u_minus_a = call(z_minus_v, z_minus_a, (t - fd_eps_t).clamp_min(0.0), r)
+        u_plus_v, u_plus_a = call(z_plus_v, z_plus_a, (t + fd_eps_t).clamp_max(1.0), r, train_forward=False)
+        u_minus_v, u_minus_a = call(z_minus_v, z_minus_a, (t - fd_eps_t).clamp_min(0.0), r, train_forward=False)
         denom_v = _broadcast_time((2.0 * fd_eps_t).clamp_min(1e-6), u_plus_v)
         valid_v = _broadcast_time(fd_eps_t > 0, u_plus_v)
         du_dt_v = torch.where(valid_v, (u_plus_v - u_minus_v) / denom_v, torch.zeros_like(u_plus_v))
@@ -256,5 +282,8 @@ def anyflow_ltx2_stage1_loss(
         "audio_loss_mask_ratio": _mask_ratio(audio_loss_mask_prepared, u_a).detach() if u_a is not None else loss_total.new_tensor(0.0),
         "using_video_loss_mask": loss_total.new_tensor(float(video_loss_mask_prepared is not None)),
         "using_audio_loss_mask": loss_total.new_tensor(float(audio_loss_mask_prepared is not None)),
+        "gradient_checkpointing_main_forward": loss_total.new_tensor(float(bool(model_kwargs.get("use_gradient_checkpointing", False)))),
+        "gradient_checkpointing_target_forward": loss_total.new_tensor(0.0),
+        "gradient_checkpointing_uncond_forward": loss_total.new_tensor(0.0 if cfg_fused else -1.0),
     }
     return loss_total, logs

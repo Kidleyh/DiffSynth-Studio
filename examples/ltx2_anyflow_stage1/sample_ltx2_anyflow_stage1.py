@@ -39,9 +39,27 @@ def load_anyflow_config(checkpoint):
     return json.loads(cfg_path.read_text())
 
 
+def normalize_anyflow_state_dict_for_wrapper(state):
+    normalized = {}
+    changed = 0
+    prefixes = ("module.pipe.dit.", "pipe.dit.")
+    for key, value in state.items():
+        new_key = key
+        for prefix in prefixes:
+            if key.startswith(prefix):
+                new_key = key[len(prefix):]
+                changed += 1
+                break
+        normalized[new_key] = value
+    if changed:
+        print(f"Normalized {changed} native checkpoint keys for bare LTX2AnyFlowWrapper load.", flush=True)
+    return normalized
+
+
 def load_anyflow_state(checkpoint):
     _, state_path, _ = checkpoint_paths(checkpoint)
-    return torch.load(state_path, map_location="cpu")
+    state = torch.load(state_path, map_location="cpu")
+    return normalize_anyflow_state_dict_for_wrapper(state)
 
 
 def state_dict_has_lora(state):

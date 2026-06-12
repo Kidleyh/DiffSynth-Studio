@@ -219,6 +219,16 @@ bash examples/ltx2_anyflow_stage1/test_lowres_train1_sample_4gpu.sh
 
 By default it generates a temporary sampler model config from the same LTX-2.3 `model_id:origin_file_pattern` specs used by the native training scripts. This validation script uses 4 GPUs for native training, defaults to `128x128x9`, trains only 1 step with LoRA rank 8, checks the native sidecar checkpoint and first-step JSON logs, then runs 4-step `--latent_rollout_only` sampling from `checkpoint-step_000001`. The sampling stage validates native sidecar LoRA injection, strict checkpoint loading, and latent rollout output files.
 
+Gradient-checkpointing policy validation:
+
+```bash
+USE_GRADIENT_CHECKPOINTING=1 \
+RUN_NAME=LTX2.3-I2AV-anyflow-stage1-lowres-gc-train1-test \
+bash examples/ltx2_anyflow_stage1/test_lowres_gc_train1_4gpu.sh
+```
+
+When `USE_GRADIENT_CHECKPOINTING=1`, AnyFlow Stage 1 only lets the main conditional training forward inherit checkpointing. Finite-difference target forwards and guidance-fused unconditional forwards are forced through `torch.no_grad()` with `use_gradient_checkpointing=False` and `use_gradient_checkpointing_offload=False`. The first-step JSON log records `gradient_checkpointing_main_forward`, `gradient_checkpointing_target_forward`, and `gradient_checkpointing_uncond_forward` to make this policy auditable. This avoids PyTorch checkpoint recompute metadata mismatches caused by AnyFlow's multiple DiT forwards under ZeRO3.
+
 Check the first-step JSON diagnostics:
 
 ```bash

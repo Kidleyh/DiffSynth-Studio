@@ -964,3 +964,64 @@ D. Validation commands run:
 
 E. Full train+sample execution:
 - Not run in this round. The script is now self-contained with default model specs, but running it would launch the full low-res 4-GPU train+sample smoke.
+
+
+## Round 13: Native sidecar `pipe.dit.` checkpoint key normalization (2026-06-11)
+
+A. Modified files:
+- `examples/ltx2_anyflow_stage1/sample_ltx2_anyflow_stage1.py`
+- `examples/ltx2_anyflow_stage1/codex_work.md`
+
+B. Files outside `examples/ltx2_anyflow_stage1`:
+No files outside `examples/ltx2_anyflow_stage1` were modified.
+
+C. Fix:
+- Native sidecar checkpoints are saved from the native training module with trainable parameter names such as `pipe.dit.dit...`.
+- The sampler loads into a bare `LTX2AnyFlowWrapper`, whose keys are `dit...`.
+- Added sampler-side state dict normalization that strips `pipe.dit.` and `module.pipe.dit.` prefixes before strict loading.
+- Strict loading is still preserved; the key namespace is normalized before calling `load_trainable_state_dict()`.
+
+D. Validation commands run:
+- Passed: `python -m py_compile examples/ltx2_anyflow_stage1/*.py`
+- Passed: synthetic pure-Python check that `pipe.dit.dit.block.to_q.lora_A.weight` becomes `dit.block.to_q.lora_A.weight`, `module.pipe.dit...` is also normalized, already-bare `dit...` keys remain unchanged, and LoRA rank inference still returns rank 8.
+
+E. User-facing symptom fixed:
+- Addresses sampler failures like `RuntimeError: Unexpected critical AnyFlow/LoRA keys: ['pipe.dit.dit.adaln_single.gate', ...]` when loading native sidecar checkpoints.
+
+
+## Round 14: Stage1 gradient-checkpointing forward policy (2026-06-12)
+
+A. Modified files:
+- `examples/ltx2_anyflow_stage1/anyflow_ltx2_stage1_loss.py`
+- `examples/ltx2_anyflow_stage1/test_lowres_gc_train1_4gpu.sh`
+- `examples/ltx2_anyflow_stage1/README.md`
+- `examples/ltx2_anyflow_stage1/codex_work.md`
+
+B. Files outside `examples/ltx2_anyflow_stage1`:
+No files outside `examples/ltx2_anyflow_stage1` were modified.
+
+C. Stage1 loss checkpoint policy:
+- Main conditional training forward keeps the incoming `use_gradient_checkpointing` / offload kwargs.
+- Finite-difference target forwards `u_plus/u_minus` now run under `torch.no_grad()` with `use_gradient_checkpointing=False` and `use_gradient_checkpointing_offload=False`.
+- CFG-fused unconditional forward also runs under `torch.no_grad()` with checkpointing/offload disabled.
+- Logs now include `gradient_checkpointing_main_forward`, `gradient_checkpointing_target_forward`, and `gradient_checkpointing_uncond_forward`.
+
+D. Verification script:
+- Added `examples/ltx2_anyflow_stage1/test_lowres_gc_train1_4gpu.sh`.
+- The script runs 4-GPU low-res `128x128x9`, `MAX_STEPS=1`, `SAVE_STEPS=1`, `TRAIN_DATASET_REPEAT=1`, and `USE_GRADIENT_CHECKPOINTING=1`.
+- It checks checkpoint/log files, finite `loss_total`, and the logged checkpoint policy fields.
+
+E. Validation commands run:
+- Passed before train launch: `python -m py_compile examples/ltx2_anyflow_stage1/*.py`
+- Failed: `USE_GRADIENT_CHECKPOINTING=1 RUN_NAME=LTX2.3-I2AV-anyflow-stage1-lowres-gc-train1-test bash examples/ltx2_anyflow_stage1/test_lowres_gc_train1_4gpu.sh`
+
+F. Failure summary:
+- The run still failed during `accelerator.backward(loss)` under 4 GPU ZeRO3 with `torch.utils.checkpoint.CheckpointError`.
+- Error shape pattern remained `saved metadata shape [4096]` vs `recomputed metadata shape [0]` on all ranks.
+- This happened after target finite-difference forwards and cfg-uncond forwards were forced to no-grad/no-checkpoint, so the remaining likely source is the main conditional forward checkpointing path interacting with ZeRO3 parameter partition/recompute.
+- No checkpoint/log JSON was saved because backward failed before the first optimizer step and logging checkpoint.
+
+G. Next localization matrix:
+- Run 1 GPU without DeepSpeed plus `USE_GRADIENT_CHECKPOINTING=1` to check whether PyTorch checkpointing itself is valid for the main AnyFlow forward.
+- Run 4 GPU ZeRO3 plus `USE_GRADIENT_CHECKPOINTING=1` as the current failing case.
+- If 1 GPU passes and 4 GPU fails, treat this as ZeRO3 partition plus torch checkpoint interaction and evaluate either a no-ZeRO checkpointing path, DeepSpeed activation checkpoint config, or disabling torch checkpointing for ZeRO3 main forward.
